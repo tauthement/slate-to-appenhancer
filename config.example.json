@@ -1,0 +1,27 @@
+{
+  "slate_api_url": "https://apply.university.edu/api/query/run",
+  "slate_query_id": "YOUR_QUERY_ID",
+  "slate_bearer_token": "YOUR_TOKEN",
+
+  "importer_path": "C:\\BDM\\IndexImageImport.exe",
+  "import_application": "BDMAPP",
+  "import_specification": "Slate Import",
+  "import_user": "myBDMuser",
+  "import_pass": "myBDMpassword",
+  "import_datasource": "MyDataSource",
+
+  "work_dir": "C:\\SlateBDM",
+  "days_to_keep_archive": 30,
+
+  "log_file": "C:\\SlateBDM\\logs\\slate_to_bdm.log",
+
+  "download_retry_attempts": 5,
+  "download_retry_delay": 5,
+
+  "smtp_server": "smtp.yourdomain.com",
+  "smtp_port": 587,
+  "smtp_user": "you@yourdomain.com",
+  "smtp_pass": "yourpassword",
+  "smtp_from": "you@yourdomain.com",
+  "smtp_to": "alerts@yourdomain.com"
+}
