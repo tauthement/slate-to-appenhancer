@@ -1,27 +1,26 @@
 {
-  "slate_api_url": "https://apply.university.edu/api/query/run",
-  "slate_query_id": "YOUR_QUERY_ID",
-  "slate_bearer_token": "YOUR_TOKEN",
+  "work_dir": ".",
+  "log_dir": "./logs",
 
-  "importer_path": "C:\\BDM\\IndexImageImport.exe",
-  "import_application": "BDMAPP",
-  "import_specification": "Slate Import",
-  "import_user": "myBDMuser",
-  "import_pass": "myBDMpassword",
-  "import_datasource": "MyDataSource",
-
-  "work_dir": "C:\\SlateBDM",
-  "days_to_keep_archive": 30,
-
-  "log_file": "C:\\SlateBDM\\logs\\slate_to_bdm.log",
+  "slate_api_url": "https://apply.yourschool.edu/manage/query/run",
+  "slate_query_id": "YOUR_SLATE_QUERY_ID",
+  "slate_bearer_token": "YOUR_SLATE_BEARER_TOKEN",
 
   "download_retry_attempts": 5,
   "download_retry_delay": 5,
 
-  "smtp_server": "smtp.yourdomain.com",
+  "appxtender_url": "https://appxtender.school.edu/AppXtenderReST/api/AXDataSources/DATASOURCE/AXApps/APPID/AXDocs",
+  "appxtender_user": "APPXTENDER_USERNAME",
+  "appxtender_pass": "APPXTENDER_PASSWORD",
+  "appxtender_retry_attempts": 3,
+  "appxtender_retry_delay": 5,
+
+  "days_to_keep_archive": 30,
+
+  "smtp_server": "smtp.yourdomain.edu",
   "smtp_port": 587,
-  "smtp_user": "you@yourdomain.com",
-  "smtp_pass": "yourpassword",
-  "smtp_from": "you@yourdomain.com",
-  "smtp_to": "alerts@yourdomain.com"
+  "smtp_user": "smtp_user@yourdomain.edu",
+  "smtp_pass": "smtp_password",
+  "smtp_from": "slate-bdm@yourdomain.edu",
+  "smtp_to": "bdm-admins@yourdomain.edu"
 }

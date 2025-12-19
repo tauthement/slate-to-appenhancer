@@ -1,14 +1,18 @@
+#!/usr/bin/env python3
+
 import os
 import json
 import csv
 import shutil
 import logging
 import requests
+from requests.auth import HTTPBasicAuth
 import subprocess
 import smtplib
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
+import argparse  # ensure already at top; if not, add this import
 
 # --------------------------------------------------------------
 # Load Config
@@ -22,12 +26,26 @@ config = load_config()
 WORK_DIR = config["work_dir"]
 DOWNLOAD_DIR = os.path.join(WORK_DIR, "downloads")
 ARCHIVE_DIR = os.path.join(WORK_DIR, "archive")
-LOG_FILE = config["log_file"]
 IMPORTED_RECORD_FILE = os.path.join(WORK_DIR, "imported_records.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+# --------------------------------------------------------------
+# Log File Path (Year/Month with Timestamped Filename)
+# --------------------------------------------------------------
+now = datetime.now()
+log_dir = os.path.join(
+    config["log_dir"],
+    now.strftime("%Y"),
+    now.strftime("%m")
+)
+os.makedirs(log_dir, exist_ok=True)
+
+LOG_FILE = os.path.join(
+    log_dir,
+    f"slatetobdmax_{now.strftime('%Y%m%d_%H%M%S')}.log"
+)
 
 # --------------------------------------------------------------
 # Logging Setup
@@ -38,6 +56,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO
 )
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.getLogger().addHandler(console)
 
 # --------------------------------------------------------------
 # Email Notification
@@ -59,25 +81,216 @@ def send_failure_email(subject, msg):
         logging.error(f"Failed to send failure notification email: {e}")
 
 # --------------------------------------------------------------
+# Structured Upload Logging
+# --------------------------------------------------------------
+def log_upload_event(event_type, record, **extra):
+    payload = {
+        "event": event_type,
+        "filename": record.get("DocumentFileName"),
+        "local_file": record.get("local_file"),
+        "ID": record.get('ID'),
+        "first name": record.get('FIRSTNAME'),
+        "last name": record.get('LASTNAME'),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    payload.update(extra)
+    logging.info(json.dumps(payload))
+
+# --------------------------------------------------------------
+# Build AppXtender Metadata
+# --------------------------------------------------------------
+def build_appxtender_metadata(record):
+    """
+    Build the AppXtender metadata JSON payload from a Slate record.
+    FieldID values must match AppXtender index definitions.
+    """
+
+    return {
+        "TargetDoc": None,
+        "NewIndex": {
+            "indexid": 0,
+            "values": [
+                {"FieldID": "field1", "FieldValue": record.get("ID")},
+                # {"FieldID": "field2", "FieldValue": record.get("PIDM")},
+                {"FieldID": "field3", "FieldValue": record.get("DOCUMENTTYPE")},
+                {"FieldID": "field4", "FieldValue": record.get("LASTNAME")},
+                {"FieldID": "field5", "FieldValue": record.get("FIRSTNAME")},
+                {"FieldID": "field6", "FieldValue": record.get("SSN")},
+                {"FieldID": "field7", "FieldValue": record.get("BIRTHDATE")},
+                {"FieldID": "field8", "FieldValue": record.get("TERMCODE")},
+                {"FieldID": "field9", "FieldValue": record.get("APPLICATIONNUMBER")},
+                {"FieldID": "field10", "FieldValue": record.get("ADMISSIONSREQUIREMENT")},
+                {"FieldID": "field11", "FieldValue": record.get("INSTITUTIONNUMBER")},
+                {"FieldID": "field12", "FieldValue": record.get("ROUTINGSTATUS")},
+                # {"FieldID": "field13", "FieldValue": record.get("ACTIVITYDATE")},
+                {"FieldID": "field14", "FieldValue": record.get("COMMENTS")},
+                {"FieldID": "field15", "FieldValue": record.get("LASTUPDATE")},
+                # {"FieldID": "field16", "FieldValue": record.get("DISPOSITIONDATE")},
+                {"FieldID": "field17", "FieldValue": record.get("RECRUITERID")},
+                {"FieldID": "field18", "FieldValue": record.get("RECRUITDOCUMENTID")},
+                {"FieldID": "field19", "FieldValue": record.get("STUDENTSTATUSPERTRANSCRIPT")},
+                {"FieldID": "field20", "FieldValue": record.get("PENDINGADMINISTRATIVEMATTERYN")},
+                {"FieldID": "field21", "FieldValue": record.get("CODEOFCONDUCTVIOLATIONYN")},
+            ],
+            "links": []
+        },
+        "NativeNewIndex": None,
+        "FromBatch": None,
+        "BatchPageNum": 0,
+        "PageRange": None,
+        "MergeDuplicateIndex": False,
+        "IgnoreDuplicateIndex": False,
+        "IgnoreDlsViolation": False,
+        "SubmitFullText": True
+    }
+
+# --------------------------------------------------------------
+# AppXtender Upload
+# --------------------------------------------------------------
+def upload_to_appxtender(record, dry_run=False):
+    attempts = config.get("appxtender_retry_attempts", 3)
+    delay = config.get("appxtender_retry_delay", 5)
+
+    if dry_run:
+        log_upload_event(
+            "appxtender_upload_dry_run",
+            record,
+            attempts=attempts
+        )
+        logging.info(
+            f"DRY RUN: Would upload {record['DocumentFileName']} to AppXtender"
+        )
+        return {"success": True, "document_id": None}
+
+    metadata = build_appxtender_metadata(record)
+
+    for attempt in range(1, attempts + 1):
+        log_upload_event(
+            "appxtender_upload_attempt",
+            record,
+            attempt=attempt,
+            max_attempts=attempts
+        )
+
+        try:
+            with open(record["local_file"], "rb") as fh:
+                files = {
+                    "data": (
+                        None,
+                        json.dumps(metadata),
+                        "application/vnd.emc.ax+json; charset=utf-8"
+                    ),
+                    "bin": (
+                        os.path.basename(record["local_file"]),
+                        fh,
+                        "application/bin"
+                    )
+                }
+
+                response = requests.post(
+                    config["appxtender_url"],
+                    files=files,
+                    auth=HTTPBasicAuth(
+                        config["appxtender_user"],
+                        config["appxtender_pass"]
+                    ),
+                    timeout=60
+                )
+
+            if response.status_code in (200, 201):
+                doc_id = None
+                try:
+                    resp_json = response.json()
+                    doc_id = resp_json.get("ID")
+                except Exception:
+                    pass
+
+                log_upload_event(
+                    "appxtender_upload_success",
+                    record,
+                    document_id=doc_id,
+                    http_status=response.status_code
+                )
+
+                logging.info(
+                    f"AppXtender upload success: "
+                    f"{record['DocumentFileName']} | DocumentID={doc_id}"
+                )
+                return {"success": True, "document_id": doc_id}
+
+            log_upload_event(
+                "appxtender_upload_retry",
+                record,
+                attempt=attempt,
+                http_status=response.status_code,
+                response=response.text
+            )
+
+            logging.warning(
+                f"AppXtender upload failed "
+                f"({response.status_code}) for "
+                f"{record['DocumentFileName']}: {response.text}"
+            )
+
+        except Exception as e:
+            log_upload_event(
+                "appxtender_upload_exception",
+                record,
+                attempt=attempt,
+                error=str(e)
+            )
+            logging.warning(
+                f"AppXtender upload exception "
+                f"({attempt}/{attempts}) for "
+                f"{record['DocumentFileName']} "
+                f"using URL {config['appxtender_url']}: {e}"
+            )
+
+        if attempt < attempts:
+            time.sleep(delay)
+
+    log_upload_event(
+        "appxtender_upload_failed",
+        record,
+        attempts=attempts
+    )
+
+    # send_failure_email(
+    #     "Slate to AppXtender: Upload Failed",
+    #     f"{record['DocumentFileName']} failed after {attempts} attempts"
+    # )
+
+    return {"success": False, "error": "Upload failed after retries"}
+
+# --------------------------------------------------------------
 # Load Imported Records
 # --------------------------------------------------------------
 def load_imported_records():
     if not os.path.exists(IMPORTED_RECORD_FILE):
-        return set()
-    with open(IMPORTED_RECORD_FILE, "r") as f:
-        return set(json.load(f))
+        return {}
+
+    try:
+        with open(IMPORTED_RECORD_FILE, "r") as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except json.JSONDecodeError:
+        logging.warning(
+            f"Imported records file is empty or corrupt: "
+            f"{IMPORTED_RECORD_FILE}. Starting fresh."
+        )
+        return {}
 
 def save_imported_records(records):
     with open(IMPORTED_RECORD_FILE, "w") as f:
-        json.dump(list(records), f)
-
-imported_records = load_imported_records()
+        json.dump(records, f)
 
 # --------------------------------------------------------------
 # Fetch Slate Data
 # --------------------------------------------------------------
 def fetch_slate_results():
-    url = f"{config['slate_api_url']}?query_id={config['slate_query_id']}"
+    url = f"{config['slate_api_url']}?id={config['slate_query_id']}&cmd=service&output=json"
     headers = {"Authorization": f"Bearer {config['slate_bearer_token']}"}
 
     try:
@@ -137,70 +350,6 @@ def download_file(url, filename):
     return None
 
 # --------------------------------------------------------------
-# Build CSV for Index Importer
-# --------------------------------------------------------------
-def build_csv(records):
-    csv_path = os.path.join(WORK_DIR, "import.csv")
-
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "ID", "PIDM", "DOCUMENT TYPE",
-            "LAST NAME", "FIRST NAME", "BIRTH DATE",
-            "TERM CODE", "APPLICATION NUMBER", "FILENAME"
-        ])
-
-        for r in records:
-            line = (
-                f"{r['ID']},"
-                f"{r['PIDM']},"
-                f"\"{r['DOCUMENTTYPE']}\","
-                f"\"{r['LASTNAME']}\","
-                f"\"{r['FIRSTNAME']}\","
-                f"\"{r['BIRTHDATE']}\","
-                f"{r['TERMCODE']},"
-                f"{r['APPLICATION NUMBER']}@@{r['local_file']}"
-            )
-            f.write(line + "\n")
-
-    logging.info(f"CSV built: {csv_path}")
-    return csv_path
-
-# --------------------------------------------------------------
-# Run IndexImageImport.exe
-# --------------------------------------------------------------
-def run_importer(csv_path):
-    cmd = [
-        config["importer_path"],
-        "/U", config["import_user"],
-        "/W", config["import_pass"],
-        "/A", config["import_application"],
-        "/S", f"\"{config['import_specification']}\"",
-        "/N", config["import_datasource"],
-        "/K 1", # skip the header row
-        "I", # allow others to add documents to application while import is running
-        "/F", csv_path
-    ]
-
-    logging.info(f"Running Importer: {' '.join(cmd)}")
-
-    proc = subprocess.run(
-        " ".join(cmd),
-        shell=True,
-        capture_output=True,
-        text=True
-    )
-
-    if proc.returncode == 0:
-        logging.info("Importer completed successfully.")
-        return True
-
-    msg = f"Importer failed: {proc.stdout}\n{proc.stderr}"
-    logging.error(msg)
-    send_failure_email("Slate to BDM: Importer Failure", msg)
-    return False
-
-# --------------------------------------------------------------
 # Archive Files
 # --------------------------------------------------------------
 def archive_files(records):
@@ -231,6 +380,21 @@ def cleanup_archives():
 def main():
     global imported_records
 
+    imported_records = load_imported_records()
+
+    parser = argparse.ArgumentParser(description="Slate to BDM AX Import Script")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose console output")
+    parser.add_argument("--dry-run", action="store_true", help="Do not upload or archive files, just simulate")
+    args = parser.parse_args()
+
+    dry_run = args.dry_run
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        for handler in logging.getLogger().handlers:
+            handler.setLevel(logging.DEBUG)
+        logging.debug("Verbose mode enabled.")
+
     slate_rows = fetch_slate_results()
     if not slate_rows:
         logging.info("No Slate data returned.")
@@ -259,18 +423,33 @@ def main():
         logging.info("No new files to import.")
         return
 
-    csv_path = build_csv(processed)
+    successful_records = []
+    for r in processed:
+        result = upload_to_appxtender(r, dry_run=dry_run)
 
-    success = run_importer(csv_path)
+        if dry_run:
+            logging.info(f"DRY RUN: Simulated upload for {r['DocumentFileName']}")
 
-    if success:
-        archive_files(processed)
+        filename = r["DocumentFileName"]
+        now_ts = datetime.now(timezone.utc).isoformat()
 
-        for r in processed:
-            imported_records.add(r["DocumentFileName"])
-        save_imported_records(imported_records)
+        if result.get("success"):
+            if not dry_run:
+                imported_records[filename] = {
+                    "document_id": result.get("document_id"),
+                    "uploaded_at": now_ts
+                }
+                save_imported_records(imported_records)
+            else:
+                logging.info(f"DRY RUN: {filename} would be recorded as imported")
+            successful_records.append(r)
+        else:
+            logging.warning(
+                f"Upload failed for {filename}; not recording in imported_records.json"
+            )
 
-        os.remove(csv_path)
+    if successful_records and not dry_run:
+        archive_files(successful_records)
 
     cleanup_archives()
 
