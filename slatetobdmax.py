@@ -338,7 +338,7 @@ def fetch_slate_results():
 
     except Exception as e:
         logging.error(f"Slate API request failed: {e}")
-        send_failure_email("Slate to BDM: Slate API Failure", str(e))
+        # send_failure_email("Slate to BDM: Slate API Failure", str(e))
         return []
 
 # --------------------------------------------------------------
@@ -377,7 +377,7 @@ def download_file(url, filename):
     # Failed all retries
     msg = f"Failed to download file after {attempts} attempts: {filename}"
     logging.error(msg)
-    send_failure_email("Slate to BDM: File Download Failure", msg)
+    #send_failure_email("Slate to BDM: File Download Failure", msg)
     return None
 
 # --------------------------------------------------------------
