@@ -197,6 +197,7 @@ def upload_to_appxtender(record, dry_run=False):
                     timeout=60
                 )
 
+            # Successful upload
             if response.status_code in (200, 201):
                 doc_id = None
                 try:
@@ -217,6 +218,36 @@ def upload_to_appxtender(record, dry_run=False):
                     f"{record['DocumentFileName']} | DocumentID={doc_id}"
                 )
                 return {"success": True, "document_id": doc_id}
+            
+            # --- DUPLICATE INDEX (Error 125) ---
+            try:
+                resp_json = response.json()
+            except Exception:
+                resp_json = {}
+
+            error_code = resp_json.get("ErrorCode")
+            error_msg = resp_json.get("Message", "")
+
+            if error_code == 125 or "duplicate index" in error_msg.lower():
+                log_upload_event(
+                    "appxtender_upload_duplicate",
+                    record,
+                    error_code=error_code,
+                    message=error_msg,
+                    http_status=response.status_code
+                )
+
+                logging.warning(
+                    f"Duplicate index detected for {record['DocumentFileName']} "
+                    f"(Error 125). Treating as already imported."
+                )
+
+                # Treat as success
+                return {
+                    "success": True,
+                    "document_id": None,
+                    "duplicate": True
+                }
 
             log_upload_event(
                 "appxtender_upload_retry",
