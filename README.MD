@@ -17,7 +17,7 @@ This project automates the process of fetching document records from a Slate que
 ## Prerequisites
 
 - Python 3.6+
-- `requests` library: `pip install requests`
+    - `requests` library: `pip install requests`
 - OpenText AppEnhancer 24.4
     - Earlier versions of AppExtender/AppEnhancer can be used but may not support the PDF decryption feature which is required to be able to use the annotation features of AppExtender/AppEnhancer.
 - Slate CRM
