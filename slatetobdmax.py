@@ -488,7 +488,7 @@ def cleanup_logs():
 # Main
 # --------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Slate to BDM AX Import Script")
+    parser = argparse.ArgumentParser(description="Slate to AppEnhancer Import Script")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     
