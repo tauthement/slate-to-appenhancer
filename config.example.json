@@ -2,25 +2,38 @@
   "work_dir": ".",
   "log_dir": "./logs",
 
-  "slate_api_url": "https://apply.yourschool.edu/manage/query/run",
+  "slate_api_url": "https://your.slateurl.edu/manage/query/run",
   "slate_query_id": "YOUR_SLATE_QUERY_ID",
   "slate_bearer_token": "YOUR_SLATE_BEARER_TOKEN",
 
   "download_retry_attempts": 5,
   "download_retry_delay": 5,
 
-  "appxtender_url": "https://appxtender.school.edu/AppXtenderReST/api/AXDataSources/DATASOURCE/AXApps/APPID/AXDocs",
-  "appxtender_user": "APPXTENDER_USERNAME",
-  "appxtender_pass": "APPXTENDER_PASSWORD",
-  "appxtender_retry_attempts": 3,
-  "appxtender_retry_delay": 5,
+  "appenhancer_base_url": "https://appenhancer.yourschool.edu/AppEnhancerReST/api",
+  "appenhancer_datasource": "YOUR_DATASOURCE",
+  "appenhancer_appid": "YOUR_APP_ID",
+  "appenhancer_urlparams": "importOption=DecryptPDFFile",
+  "appenhancer_user": "YOUR_APPENHANCER_USERNAME",
+  "appenhancer_pass": "YOUR_APPENHANCER_PASSWORD",
+  "appenhancer_retry_attempts": 3,
+  "appenhancer_retry_delay": 5,
 
   "days_to_keep_archive": 30,
+  "days_to_keep_logs": 30,
 
   "smtp_server": "smtp.yourdomain.edu",
   "smtp_port": 587,
   "smtp_user": "smtp_user@yourdomain.edu",
   "smtp_pass": "smtp_password",
   "smtp_from": "slate-bdm@yourdomain.edu",
-  "smtp_to": "bdm-admins@yourdomain.edu"
+  "smtp_to": "bdm-admins@yourdomain.edu",
+
+  "metadata_mapping": [
+    {"field_id": "field1", "slate_key": "ID", "db_column": "student_id"},
+    {"field_id": "field2", "slate_key": "DOCUMENTTYPE", "db_column": "document_type"},
+    {"field_id": "field3", "slate_key": "TERMCODE", "db_column": "term_code"},
+    {"field_id": "field4", "slate_key": "LASTNAME", "db_column": "last_name"},
+    {"field_id": "field5", "slate_key": "FIRSTNAME", "db_column": "first_name"},
+    {"field_id": "field6", "slate_key": "BIRTHDATE", "db_column": "birthdate"}
+  ]
 }
