@@ -2,7 +2,6 @@
 
 import os
 import json
-import csv
 import shutil
 import logging
 import requests
