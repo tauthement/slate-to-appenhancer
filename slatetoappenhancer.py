@@ -508,6 +508,9 @@ def main():
     ae_datasource = args.datasource or config.get("appenhancer_datasource")
     ae_appid = args.appid or config.get("appenhancer_appid")
     ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
+
+    # Resolve Slate document field name
+    slate_document_url_field = config.get("slate_material_url_field", "MaterialURL")
     
     # Construct AppEnhancer URL
     # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
@@ -532,7 +535,7 @@ def main():
     if args.dry_run and slate_rows:
         existing_filenames = {r["filename"] for r in to_process}
         for row in slate_rows:
-            fname = row.get("DocumentFileName")
+            fname = row.get("MaterialFilename")
             if fname and fname not in existing_filenames:
                 # Only simulate if NOT already SUCCESS in DB
                 if not is_already_successful(fname):
@@ -554,7 +557,7 @@ def main():
     for record in to_process:
         filename = record["filename"]
         slate_data = json.loads(record["raw_json"])
-        file_url = slate_data.get("FileURL")
+        file_url = slate_data.get(slate_document_url_field)
 
         # Step A: Download
         local_path = download_file(file_url, filename)
