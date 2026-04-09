@@ -1,6 +1,8 @@
-# Slate to AppEnhancer (BDM) AX Import
+# Slate to AppEnhancer (BDM) Import
 
 This project automates the process of fetching document records from a Slate query, downloading the associated PDF files, and importing them into OpenText AppEnhancer (formerly AppXtender) via its REST API.
+
+Earlier versions of AppExtender/AppEnhancer can be used but may not support the PDF decryption feature which is required to be able to use the annotation features of AppExtender/AppEnhancer. Without the PDF decryption feature of AppEnhancer 24.4, any documents uploaded may not allow annotations since the document is encrypted by Slate using Adobe DRM to prevent editing. 
 
 ## Features
 
@@ -18,18 +20,20 @@ This project automates the process of fetching document records from a Slate que
 
 - Python 3.6+
     - `requests` library: `pip install requests`
-- OpenText AppEnhancer 24.4
-    - Earlier versions of AppExtender/AppEnhancer can be used but may not support the PDF decryption feature which is required to be able to use the annotation features of AppExtender/AppEnhancer.
+- OpenText AppEnhancer Web Access 24.4
+- OpenText AppEnhancer Administrator 24.4
+- OpenText AppEnhancer REST Services 24.4
 - Slate CRM
     - You will need the ability to create a query, or have someone create one for you.
 
 ## Configuration
 
-The script relies on a `config.json` file. Use `config.example.json` as a template.
+The script relies on a `config.json` file. Use `config.example.json` as a template. Rename or copy the file to `config.json`.
 
 ### Key Configuration Sections
 
 - **Slate API:** URL, Query ID, and Bearer Token for your Slate instance.
+    - **Slate Material URL:** The field name used in the Slate query to output the material download URL. 
 - **AppEnhancer API:**
     - `appenhancer_base_url`: The root URL of the REST API.
     - `appenhancer_datasource`: The target datasource (e.g., "TEST" or "PROD").
@@ -94,3 +98,59 @@ The `records.db` table `records` includes:
 
 ## Support
 If a record fails repeatedly, check the `last_error` column in `records.db` or the log file for the specific API response from AppEnhancer.
+
+## Slate Setup
+
+This script relies on the Queries/Reports functionality of Slate. You must have access to build a query or request a Slate administrator to build a query for you. 
+
+1. Login to the Slate admin page
+2. Go to the Queries page
+3. Click `New Query`
+4. Start building your query to meet your needs
+    - This part is mostly left to your own discretion. You should match these fields with the ones in your AppEnhancer application. At minimum, you will need the required fields from your AppEnhancer application.
+5. Add a PDF field to your query
+    - *NOTE:* This will add a link to a PDF of the document uploaded by the student. It is only a link and not the full binary PDF file. The script will take care of downloading the PDF from the link.
+    1. Open the query editor.
+    2. Under the Exports section, click the Subquery button on the right side of the Export button.
+        <br>
+        ![Subquery](images/export-subquery.png)
+    3. Follow the Single Material tutorial from [this site](https://resource.reworkflow.com/books/slate/page/material-download-link).
+        - *NOTE:* On step 3 of the Instructions section, you should add the base URL of your Slate instance before `/apply/download.pdf`.
+            - ex. `https://slate.univ.edu/apply/download.pdf` 
+    4. Name the field the same as the `slate_material_url_field` value in `config.json`. 
+        - ex. `MaterialURL`
+6. After building the query, enable the web service to create an API endpoint. See the [Slate documentation](https://knowledge.technolutions.net/docs/exporting-data-with-web-services) for more information.
+    1. In the `Edit Query` page, click `Edit Permissions`.
+    2. Click `Add Grantee`.
+    3. In the Edit Grantee window:
+        1. For `Active`, choose `Active`.
+        2. For `Type`, choose `User Token`. 
+        3. Enter a name.
+        4. Leave the token set to the randomly generated value. You will need this token for the script config so store it in a secure place.
+        5. If you want to lock down the API endpoint to a certain IP, enter the IP address or range under `Allowed Networks`.
+        6. For `Permissions`, enable `Web Service`.
+        7. Click `Save`.
+7. Once saved, a `JSON` link will appear in the `Edit Query` page under `Web Service`.
+
+## AppEnhancer Setup 
+
+To use the AppEnhancer API, an AppEnhancer username and password must be created with the correct privileges. This must be done by an AppEnhancer administrator in the AppEnhancer Admin app. You must also have the AppEnhancer REST Services application installed on the server.
+
+Before uploading a document, you must also have an AppEnhancer application within a data source to upload the document to.
+
+1. Login to `AppEnhancer Admin`
+2. Go to `Application Management` and expand the data source that contains the application you wish to use
+3. Click `Users` under the data source
+4. Click `Add`
+5. In the `User` tab, enter a username and password for the account. The full name field is optional. 
+6. In the `Profile` tab, select the application that files will be uploaded to.
+    1. Click the `No Privilege` button to erase all of the checkboxes.
+    2. Under the `Privileges` section, enable the following checkboxes:
+        - Scan/Index Online  
+        - Batch Scan  
+        - Batch Index  
+        - Modify Index  
+        - Display 
+        - Delete Doc 
+        - Add Page
+7. Click `Save`
