@@ -41,6 +41,7 @@ The script relies on a `config.json` file. Use `config.example.json` as a templa
     - `appenhancer_urlparams`: Additional query parameters (e.g., `importOption=DecryptPDFFile`).
         - In order to utilize document annotations, you must use the `importOption=DecryptPDFFile` parameter since PDFs from Slate are encrypted. 
             - This `importOption=DecryptPDFFile` parameter is not available in AppXtender 20.4 or below per my testing. It was not tested on AppEnhancer 23.4, but was tested using AppEnhancer 24.4. Uploads should still work on older versions using the API endpoint but the PDF may not be decrypted and may not show the annotation tools when viewed in AppXtender/AppEnhancer. Just omit the `importOption=DecryptPDFFile` parameter if you are on an older version of AppXtender/AppEnhancer.
+        - To use additional parameters, join them using an ampersand. (e.g., `importOption=DecryptPDFFile&nativetype=true`)
 - **SMTP Settings:**
     - `smtp_to`: A single email or a comma-separated list of recipients (e.g., `"admin1@school.edu, admin2@school.edu"`).
 - **Cleanup Settings:**
