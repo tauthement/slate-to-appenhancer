@@ -43,7 +43,7 @@ os.makedirs(log_dir, exist_ok=True)
 
 LOG_FILE = os.path.join(
     log_dir,
-    f"slatetobdmax_{now.strftime('%Y%m%d_%H%M%S')}.log"
+    f"slatetoappenhancer_{now.strftime('%Y%m%d_%H%M%S')}.log"
 )
 
 # --------------------------------------------------------------
@@ -202,13 +202,13 @@ def send_summary_email(success_count, fail_count, success_list, fail_list):
 
     # Build Subject: [Success: X][Fail: Y] or [Success: X]
     if fail_count > 0:
-        subject = f"Slate to BDM: [Success: {success_count}][Fail: {fail_count}]"
+        subject = f"Slate to AE: [Success: {success_count}][Fail: {fail_count}]"
     else:
-        subject = f"Slate to BDM: [Success: {success_count}]"
+        subject = f"Slate to AE: [Success: {success_count}]"
 
     # Build Body
     body_lines = [
-        f"Slate to BDM Import Summary",
+        f"Slate to AE Import Summary",
         f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"--------------------------------------------------",
         f"Total Successes: {success_count}",
