@@ -112,7 +112,7 @@ def upsert_slate_records(rows):
     mapping = config.get("metadata_mapping", [])
     
     for row in rows:
-        filename = row.get("DocumentFileName")
+        filename = row.get("MaterialFileName")
         if not filename:
             continue
             
