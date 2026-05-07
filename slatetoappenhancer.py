@@ -110,9 +110,10 @@ def upsert_slate_records(rows):
     cursor = conn.cursor()
     now_ts = datetime.now(timezone.utc).isoformat()
     mapping = config.get("metadata_mapping", [])
+    slate_material_filename_field = config.get("slate_material_filename_field", "MaterialFileName")
     
     for row in rows:
-        filename = row.get("MaterialFileName")
+        filename = row.get(slate_material_filename_field)
         if not filename:
             continue
             
@@ -509,8 +510,9 @@ def main():
     ae_appid = args.appid or config.get("appenhancer_appid")
     ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
 
-    # Resolve Slate document field name
-    slate_document_url_field = config.get("slate_material_url_field", "MaterialURL")
+    # Resolve Slate material field names
+    slate_material_url_field = config.get("slate_material_url_field", "MaterialURL")
+    slate_material_filename_field = config.get("slate_material_filename_field", "MaterialFileName")
     
     # Construct AppEnhancer URL
     # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
@@ -535,7 +537,7 @@ def main():
     if args.dry_run and slate_rows:
         existing_filenames = {r["filename"] for r in to_process}
         for row in slate_rows:
-            fname = row.get("MaterialFilename")
+            fname = row.get(slate_material_filename_field)
             if fname and fname not in existing_filenames:
                 # Only simulate if NOT already SUCCESS in DB
                 if not is_already_successful(fname):
@@ -557,7 +559,7 @@ def main():
     for record in to_process:
         filename = record["filename"]
         slate_data = json.loads(record["raw_json"])
-        file_url = slate_data.get(slate_document_url_field)
+        file_url = slate_data.get(slate_material_url_field)
 
         # Step A: Download
         local_path = download_file(file_url, filename)

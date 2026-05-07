@@ -6,6 +6,7 @@
   "slate_query_id": "YOUR_SLATE_QUERY_ID",
   "slate_bearer_token": "YOUR_SLATE_BEARER_TOKEN",
   "slate_material_url_field": "MaterialURL",
+  "slate_material_filename_field": "MaterialFileName",
 
   "download_retry_attempts": 5,
   "download_retry_delay": 5,
