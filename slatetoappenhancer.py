@@ -101,6 +101,23 @@ def init_db():
     conn.commit()
     conn.close()
 
+def clean_value(val):
+    """
+    Helper to clean and convert metadata values to strings or None,
+    handling nested structures (like dicts and lists) returned by Slate API.
+    """
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        if "#cdata-section" in val:
+            return clean_value(val["#cdata-section"])
+        if "#whitespace" in val:
+            return clean_value(val["#whitespace"])
+        return json.dumps(val)
+    if isinstance(val, list):
+        return json.dumps(val)
+    return str(val)
+
 def upsert_slate_records(rows):
     """
     Insert or Update discovered records from Slate.
@@ -110,10 +127,10 @@ def upsert_slate_records(rows):
     cursor = conn.cursor()
     now_ts = datetime.now(timezone.utc).isoformat()
     mapping = config.get("metadata_mapping", [])
-    slate_material_filename_field = config.get("slate_material_filename_field", "MaterialFileName")
+    slate_file_name_field = config.get("slate_file_name_field", "FileName")
     
     for row in rows:
-        filename = row.get(slate_material_filename_field)
+        filename = row.get(slate_file_name_field)
         if not filename:
             continue
             
@@ -124,7 +141,7 @@ def upsert_slate_records(rows):
         # Add metadata columns from the row
         for entry in mapping:
             cols.append(entry["db_column"])
-            vals.append(row.get(entry["slate_key"]))
+            vals.append(clean_value(row.get(entry["slate_key"])))
             
         placeholders = ", ".join(["?"] * len(cols))
         query = f"INSERT OR IGNORE INTO records ({', '.join(cols)}) VALUES ({placeholders})"
@@ -267,10 +284,11 @@ def build_appenhancer_metadata(record_row):
     
     for entry in mapping:
         val = slate_data.get(entry["slate_key"])
-        if val is not None:
+        cleaned_val = clean_value(val)
+        if cleaned_val is not None:
             index_values.append({
                 "FieldID": entry["field_id"],
-                "FieldValue": str(val)
+                "FieldValue": cleaned_val
             })
 
     return {
@@ -293,19 +311,19 @@ def build_appenhancer_metadata(record_row):
 # --------------------------------------------------------------
 # AppEnhancer Upload
 # --------------------------------------------------------------
-def upload_to_appenhancer(record, local_file, upload_url, dry_run=False):
+def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_prefix=""):
     attempts = config.get("appenhancer_retry_attempts", 3)
     delay = config.get("appenhancer_retry_delay", 5) 
     filename = record["filename"]
 
     if dry_run:
-        logging.info(f"DRY RUN: Would upload {filename} to AppEnhancer at {upload_url}")
+        logging.info(f"{log_prefix}DRY RUN: Would upload {filename} to AppEnhancer at {upload_url}")
         return {"success": True, "document_id": None}
 
     metadata = build_appenhancer_metadata(record)
 
     for attempt in range(1, attempts + 1):
-        logging.info(f"AppEnhancer upload attempt {attempt}/{attempts} for {filename}")
+        logging.info(f"{log_prefix}AppEnhancer upload attempt {attempt}/{attempts} for {filename}")
 
         try:
             with open(local_file, "rb") as fh:
@@ -338,7 +356,7 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False):
                     doc_id = response.json().get("ID")
                 except: pass
                 
-                logging.info(f"AppEnhancer upload success: {filename} | ID={doc_id}")
+                logging.info(f"{log_prefix}AppEnhancer upload success: {filename} | ID={doc_id}")
                 return {"success": True, "document_id": doc_id}
             
             # Check for Duplicate Index (Error 125)
@@ -348,13 +366,13 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False):
 
             error_code = resp_json.get("ErrorCode")
             if error_code == 125 or "duplicate index" in str(resp_json.get("Message", "")).lower():
-                logging.warning(f"Duplicate detected for {filename}. Treating as success.")
+                logging.warning(f"{log_prefix}Duplicate detected for {filename}. Treating as success.")
                 return {"success": True, "document_id": None, "duplicate": True}
 
-            logging.warning(f"Upload failed ({response.status_code}): {response.text}")
+            logging.warning(f"{log_prefix}Upload failed ({response.status_code}): {response.text}")
 
         except Exception as e:
-            logging.error(f"Upload exception for {filename}: {e}")
+            logging.error(f"{log_prefix}Upload exception for {filename}: {e}")
 
         if attempt < attempts:
             time.sleep(delay)
@@ -511,8 +529,8 @@ def main():
     ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
 
     # Resolve Slate material field names
-    slate_material_url_field = config.get("slate_material_url_field", "MaterialURL")
-    slate_material_filename_field = config.get("slate_material_filename_field", "MaterialFileName")
+    slate_file_url_field = config.get("slate_file_url_field", "FileURL")
+    slate_file_name_field = config.get("slate_file_filename_field", "FileName")
     
     # Construct AppEnhancer URL
     # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
@@ -537,7 +555,7 @@ def main():
     if args.dry_run and slate_rows:
         existing_filenames = {r["filename"] for r in to_process}
         for row in slate_rows:
-            fname = row.get(slate_material_filename_field)
+            fname = row.get(slate_file_name_field)
             if fname and fname not in existing_filenames:
                 # Only simulate if NOT already SUCCESS in DB
                 if not is_already_successful(fname):
@@ -555,15 +573,20 @@ def main():
     fail_count = 0
     success_list = []
     fail_list = []
+    total = len(to_process)
 
-    for record in to_process:
+    for idx, record in enumerate(to_process, 1):
         filename = record["filename"]
         slate_data = json.loads(record["raw_json"])
-        file_url = slate_data.get(slate_material_url_field)
+        file_url = slate_data.get(slate_file_url_field)
+        prefix = f"[{idx}/{total}] "
+
+        logging.info(f"{prefix}Processing {filename}...")
 
         # Step A: Download
         local_path = download_file(file_url, filename)
         if not local_path:
+            logging.error(f"{prefix}Download failed for {filename}")
             if not args.dry_run:
                 update_record_status(filename, "DOWNLOAD_FAILED", error="Failed to download file", increment_attempt=True)
             fail_count += 1
@@ -571,7 +594,7 @@ def main():
             continue
 
         # Step B: Upload
-        result = upload_to_appenhancer(record, local_path, upload_url, dry_run=args.dry_run)
+        result = upload_to_appenhancer(record, local_path, upload_url, dry_run=args.dry_run, log_prefix=prefix)
         
         if result["success"]:
             status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
@@ -581,11 +604,13 @@ def main():
             if not args.dry_run:
                 update_record_status(filename, status, document_id=result.get("document_id"))
                 archive_file(local_path, record["raw_json"])
+                logging.info(f"{prefix}Processed successfully")
             else:
-                logging.info(f"DRY RUN: {filename} processed successfully")
+                logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
         else:
             fail_count += 1
             fail_list.append(f"{filename} ({result.get('error')})")
+            logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
             if not args.dry_run:
                 update_record_status(filename, "UPLOAD_FAILED", error=result.get("error"), increment_attempt=True)
 
