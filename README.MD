@@ -33,7 +33,8 @@ The script relies on a `config.json` file. Use `config.example.json` as a templa
 ### Key Configuration Sections
 
 - **Slate API:** URL, Query ID, and Bearer Token for your Slate instance.
-    - **Slate Material URL:** The field name used in the Slate query to output the material download URL. 
+    - `slate_file_url_field`: The field name used in the Slate query to output the material download URL (default: `FileURL`).
+    - `slate_file_name_field`: The field name used in the Slate query to output the unique filename for the document (default: `FileName`).
 - **AppEnhancer API:**
     - `appenhancer_base_url`: The root URL of the REST API.
     - `appenhancer_datasource`: The target datasource (e.g., "TEST" or "PROD").
@@ -60,24 +61,24 @@ The script relies on a `config.json` file. Use `config.example.json` as a templa
 
 ### Basic Run
 ```bash
-python3 slatetobdmax.py
+python3 slatetoappenhancer.py
 ```
 
 ### Dry Run (Simulated Processing)
 Simulate the run without uploading to AppEnhancer, archiving files, or modifying the SQLite database. New Slate records are simulated in-memory.
 ```bash
-python3 slatetobdmax.py --dry-run
+python3 slatetoappenhancer.py --dry-run
 ```
 
 ### Verbose Logging
 ```bash
-python3 slatetobdmax.py --verbose
+python3 slatetoappenhancer.py --verbose
 ```
 
 ### Command Line Overrides
 You can override target parameters without changing the config file:
 ```bash
-python3 slatetobdmax.py --baseurl "https://prod.school.edu/AppEnhancer/api" --appid 600 --datasource PRODUCTION --urlparams "importOption=DecryptPDFFile"
+python3 slatetoappenhancer.py --baseurl "https://prod.school.edu/AppEnhancer/api" --appid 600 --datasource PRODUCTION --urlparams "importOption=DecryptPDFFile"
 ```
 
 ## Database Schema
@@ -118,9 +119,12 @@ This script relies on the Queries/Reports functionality of Slate. You must have 
     3. Follow the Single Material tutorial from [this site](https://resource.reworkflow.com/books/slate/page/material-download-link).
         - *NOTE:* On step 3 of the Instructions section, you should add the base URL of your Slate instance before `/apply/download.pdf`.
             - ex. `https://slate.univ.edu/apply/download.pdf` 
-    4. Name the field the same as the `slate_material_url_field` value in `config.json`. 
-        - ex. `MaterialURL`
-6. After building the query, enable the web service to create an API endpoint. See the [Slate documentation](https://knowledge.technolutions.net/docs/exporting-data-with-web-services) for more information.
+    4. Name the field the same as the `slate_file_url_field` value in `config.json`. 
+        - ex. `FileURL`
+6. Add a field to your query containing a unique filename for each document (e.g. an application/document ID plus extension). Name it the same as the `slate_file_name_field` value in `config.json`. 
+    - ex. `FileName`
+    - This value is used as the unique key for tracking the record in `records.db`, so it must not collide between different documents.
+7. After building the query, enable the web service to create an API endpoint. See the [Slate documentation](https://knowledge.technolutions.net/docs/exporting-data-with-web-services) for more information.
     1. In the `Edit Query` page, click `Edit Permissions`.
     2. Click `Add Grantee`.
     3. In the Edit Grantee window:
@@ -131,7 +135,7 @@ This script relies on the Queries/Reports functionality of Slate. You must have 
         5. If you want to lock down the API endpoint to a certain IP, enter the IP address or range under `Allowed Networks`.
         6. For `Permissions`, enable `Web Service`.
         7. Click `Save`.
-7. Once saved, a `JSON` link will appear in the `Edit Query` page under `Web Service`.
+8. Once saved, a `JSON` link will appear in the `Edit Query` page under `Web Service`.
 
 ## AppEnhancer Setup 
 
@@ -155,3 +159,7 @@ Before uploading a document, you must also have an AppEnhancer application withi
         - Delete Doc 
         - Add Page
 7. Click `Save`
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
