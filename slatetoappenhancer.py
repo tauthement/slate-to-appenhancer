@@ -530,7 +530,7 @@ def main():
 
     # Resolve Slate material field names
     slate_file_url_field = config.get("slate_file_url_field", "FileURL")
-    slate_file_name_field = config.get("slate_file_filename_field", "FileName")
+    slate_file_name_field = config.get("slate_file_name_field", "FileName")
     
     # Construct AppEnhancer URL
     # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
