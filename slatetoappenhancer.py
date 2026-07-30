@@ -666,8 +666,8 @@ def clear_downloads():
         except Exception as e:
             logging.error(f"Failed to delete {file_path}. Reason: {e}")
 
-def cleanup_archives():
-    days = config.get("days_to_keep_archive", 0)
+def cleanup_archives(days_override=None):
+    days = days_override if days_override is not None else config.get("days_to_keep_archive", 0)
     if days <= 0:
         logging.info("days_to_keep_archive is 0 (or unset); archive cleanup is disabled and archives will accumulate indefinitely.")
         return
@@ -679,11 +679,11 @@ def cleanup_archives():
                 shutil.rmtree(full)
                 logging.info(f"Removed old archive: {full}")
 
-def cleanup_logs():
+def cleanup_logs(days_override=None):
     """
     Remove log files older than days_to_keep_logs.
     """
-    days = config.get("days_to_keep_logs", 0)
+    days = days_override if days_override is not None else config.get("days_to_keep_logs", 0)
     if days <= 0:
         logging.info("days_to_keep_logs is 0 (or unset); log cleanup is disabled and logs will accumulate indefinitely.")
         return
@@ -718,13 +718,20 @@ def main():
     parser = argparse.ArgumentParser(description="Slate to AppEnhancer Import Script")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    
+
     # AppEnhancer Overrides
     parser.add_argument("--baseurl", help="Override AppEnhancer Base URL")
     parser.add_argument("--datasource", help="Override AppEnhancer Datasource")
     parser.add_argument("--appid", help="Override AppEnhancer App ID")
     parser.add_argument("--urlparams", help="Override AppEnhancer URL Parameters")
-    
+
+    # Cleanup
+    parser.add_argument("--cleanup", action="store_true",
+                         help="Run only the archive/log cleanup and exit, skipping the Slate/AppEnhancer import.")
+    parser.add_argument("--cleanup-days", type=int, metavar="N",
+                         help="Override days_to_keep_archive and days_to_keep_logs with N for this invocation "
+                              "(applies to --cleanup or to the automatic end-of-run cleanup).")
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -733,6 +740,12 @@ def main():
     lock_fd = acquire_lock()
 
     try:
+        if args.cleanup:
+            logging.info("Running in cleanup-only mode (--cleanup); skipping the Slate/AppEnhancer import.")
+            cleanup_archives(days_override=args.cleanup_days)
+            cleanup_logs(days_override=args.cleanup_days)
+            return
+
         # Resolve AppEnhancer URL components
         ae_base_url = args.baseurl or config.get("appenhancer_base_url")
         ae_datasource = args.datasource or config.get("appenhancer_datasource")
@@ -872,9 +885,10 @@ def main():
         send_crash_alert(f"{type(e).__name__}: {e}")
 
     finally:
-        cleanup_archives()
-        cleanup_logs()
-        clear_downloads()
+        if not args.cleanup:
+            cleanup_archives(days_override=args.cleanup_days)
+            cleanup_logs(days_override=args.cleanup_days)
+            clear_downloads()
         release_lock(lock_fd)
 
 if __name__ == "__main__":

@@ -83,6 +83,17 @@ You can override target parameters without changing the config file:
 python3 slatetoappenhancer.py --baseurl "https://prod.school.edu/AppEnhancer/api" --appid 600 --datasource PRODUCTION --urlparams "importOption=DecryptPDFFile"
 ```
 
+### Cleanup Only
+Run just the archive/log cleanup (using `days_to_keep_archive`/`days_to_keep_logs` from `config.json`) without doing the Slate/AppEnhancer import:
+```bash
+python3 slatetoappenhancer.py --cleanup
+```
+Override the retention window for this invocation with `--cleanup-days` (applies to both archives and logs):
+```bash
+python3 slatetoappenhancer.py --cleanup --cleanup-days 14
+```
+`--cleanup-days` also works on a normal (non-`--cleanup`) run, overriding the automatic end-of-run cleanup for that run only, without changing `config.json`.
+
 ## Database Schema
 
 The `records.db` table `records` includes:
