@@ -9,8 +9,8 @@ Earlier versions of AppExtender/AppEnhancer can be used but may not support the 
 - **SQLite Tracking:** Every record is tracked in a local SQLite database (`records.db`) with an auto-incrementing ID.
 - **Dynamic Metadata:** AppEnhancer field mappings and SQLite columns are dynamically generated from the `config.json` file.
 - **Searchable Database:** Metadata for every student/document is stored in individual columns in the SQLite database for easy auditing and reporting.
-- **Archiving:** Successfully imported documents are moved to a dated archive directory along with their original JSON metadata.
-- **Retries:** Configurable retry logic for both file downloads and API uploads.
+- **Archiving:** Successfully imported documents are moved to a dated archive directory along with their original JSON metadata. If a same-named file already exists in that day's archive folder, the new one is saved under a suffixed name (e.g. `file_1.pdf`) instead of silently overwriting the original.
+- **Retries:** Configurable retry logic for both file downloads and API uploads. Downloads are written to a temporary `.part` file and only renamed into place after passing a basic PDF sanity check (non-empty, starts with a PDF header), so a killed process or an HTML error page served with a 200 status can never be mistaken for a good, already-downloaded file on the next run.
 - **Duplicate Detection:** Automatically handles "Duplicate Index" errors from AppEnhancer (Error 125) by marking them as such and moving on.
 - **Summary Emails:** Sends a detailed execution report at the end of each run to one or more recipients.
 - **CLI Overrides:** Easily override the AppEnhancer Base URL, Datasource, App ID, and URL parameters from the command line.

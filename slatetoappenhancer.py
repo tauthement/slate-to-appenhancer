@@ -552,6 +552,25 @@ def fetch_slate_results():
 # --------------------------------------------------------------
 # Download File
 # --------------------------------------------------------------
+def validate_downloaded_file(filepath):
+    """
+    Basic sanity check that a downloaded file is actually a PDF and not,
+    say, an HTML error/login page served with a 200 status. Returns an
+    error string if the file looks invalid, or None if it looks fine.
+    """
+    try:
+        if os.path.getsize(filepath) == 0:
+            return "Downloaded file is empty"
+        with open(filepath, "rb") as f:
+            header = f.read(5)
+    except OSError as e:
+        return f"Could not read downloaded file: {e}"
+
+    if header != b"%PDF-":
+        return f"Downloaded file does not look like a PDF (header: {header!r})"
+
+    return None
+
 def download_file(url, filename):
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     if os.path.exists(filepath):
@@ -560,22 +579,41 @@ def download_file(url, filename):
     attempts = config.get("download_retry_attempts", 5)
     delay = config.get("download_retry_delay", 5)
     last_error = None
+    tmp_path = filepath + ".part"
 
     for attempt in range(1, attempts + 1):
         try:
             r = requests.get(url, stream=True, timeout=30)
-            if r.status_code == 200:
-                with open(filepath, "wb") as f:
+            if r.status_code != 200:
+                last_error = f"HTTP {r.status_code}"
+            else:
+                # Write to a temp path and only rename into place once the
+                # download is complete and validated, so a killed process
+                # can never leave a truncated file that a later run mistakes
+                # for a good, already-downloaded one.
+                with open(tmp_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
-                return {"success": True, "path": filepath, "error": None}
-            last_error = f"HTTP {r.status_code}"
+
+                validation_error = validate_downloaded_file(tmp_path)
+                if validation_error:
+                    last_error = validation_error
+                else:
+                    os.replace(tmp_path, filepath)
+                    return {"success": True, "path": filepath, "error": None}
         except Exception as e:
             last_error = str(e)
             logging.warning(f"Download error for {filename}: {e}")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
         if attempt < attempts:
             time.sleep(delay)
+
     return {"success": False, "path": None, "error": last_error or "Download failed after retries"}
 
 # --------------------------------------------------------------
@@ -584,19 +622,33 @@ def download_file(url, filename):
 def archive_file(local_file, raw_json):
     """
     Move the document to archive and save a matching .json metadata file.
+    If a same-named file already exists in today's archive folder, the new
+    one is suffixed with a counter instead of silently overwriting it.
     """
     dst_dir = os.path.join(ARCHIVE_DIR, datetime.now().strftime("%Y/%m/%d"))
     os.makedirs(dst_dir, exist_ok=True)
-    
-    # Archive Document
+
     base_name = os.path.basename(local_file)
-    shutil.move(local_file, os.path.join(dst_dir, base_name))
-    
+    dst_path = os.path.join(dst_dir, base_name)
+
+    if os.path.exists(dst_path):
+        original_name = base_name
+        stem, ext = os.path.splitext(base_name)
+        counter = 1
+        while os.path.exists(dst_path):
+            base_name = f"{stem}_{counter}{ext}"
+            dst_path = os.path.join(dst_dir, base_name)
+            counter += 1
+        logging.warning(f"Archive collision for {original_name}; archiving as {base_name} instead of overwriting.")
+
+    # Archive Document
+    shutil.move(local_file, dst_path)
+
     # Save matching JSON file
     json_name = os.path.splitext(base_name)[0] + ".json"
     with open(os.path.join(dst_dir, json_name), "w") as f:
         f.write(raw_json)
-        
+
     logging.info(f"Archived document and metadata: {base_name}")
 
 def clear_downloads():
@@ -616,7 +668,9 @@ def clear_downloads():
 
 def cleanup_archives():
     days = config.get("days_to_keep_archive", 0)
-    if days <= 0: return
+    if days <= 0:
+        logging.info("days_to_keep_archive is 0 (or unset); archive cleanup is disabled and archives will accumulate indefinitely.")
+        return
     cutoff = datetime.now() - timedelta(days=days)
     for root, dirs, _ in os.walk(ARCHIVE_DIR):
         for dirname in dirs:
@@ -630,7 +684,9 @@ def cleanup_logs():
     Remove log files older than days_to_keep_logs.
     """
     days = config.get("days_to_keep_logs", 0)
-    if days <= 0: return
+    if days <= 0:
+        logging.info("days_to_keep_logs is 0 (or unset); log cleanup is disabled and logs will accumulate indefinitely.")
+        return
     cutoff = datetime.now() - timedelta(days=days)
     log_base_dir = config["log_dir"]
     
