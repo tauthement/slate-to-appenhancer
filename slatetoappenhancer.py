@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import os
+import sys
+import fcntl
 import json
 import shutil
 import logging
@@ -26,6 +28,7 @@ WORK_DIR = config["work_dir"]
 DOWNLOAD_DIR = os.path.join(WORK_DIR, "downloads")
 ARCHIVE_DIR = os.path.join(WORK_DIR, "archive")
 DB_PATH = os.path.join(WORK_DIR, "records.db")
+LOCK_FILE_PATH = os.path.join(WORK_DIR, ".slatetoappenhancer.lock")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -59,6 +62,35 @@ console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logging.getLogger().addHandler(console)
+
+# --------------------------------------------------------------
+# Single-Instance Lock
+# --------------------------------------------------------------
+def acquire_lock():
+    """
+    Acquire an exclusive, non-blocking OS-level file lock so overlapping
+    runs (e.g. a scheduled run firing while a prior run is still in
+    progress) can't hit the SQLite DB or downloads/archive dirs at once.
+    The lock is automatically released by the OS if this process dies,
+    so no stale-lock cleanup is needed.
+    """
+    lock_fd = open(LOCK_FILE_PATH, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logging.error("Another instance of this script appears to be running. Exiting.")
+        lock_fd.close()
+        sys.exit(1)
+
+    lock_fd.write(str(os.getpid()))
+    lock_fd.flush()
+    return lock_fd
+
+def release_lock(lock_fd):
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        lock_fd.close()
 
 # --------------------------------------------------------------
 # SQLite Setup & Dynamic Schema
@@ -290,9 +322,27 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
         body_lines.append("")
 
     msg_text = "\n".join(body_lines)
+    _send_email(subject, msg_text, log_label="Summary email")
 
+def send_crash_alert(error_text):
+    """
+    Best-effort notification for a fatal, unhandled error that aborted
+    the run before it could reach send_summary_email().
+    """
+    subject = "Slate to AE: CRITICAL FAILURE - Run Did Not Complete"
+    body = "\n".join([
+        "The Slate to AppEnhancer import script crashed and did not complete.",
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "--------------------------------------------------",
+        "Check the log file for the full traceback. Error:",
+        "",
+        error_text,
+    ])
+    _send_email(subject, body, log_label="Crash alert email")
+
+def _send_email(subject, body, log_label="Email"):
     try:
-        message = MIMEText(msg_text)
+        message = MIMEText(body)
         message["Subject"] = subject
         message["From"] = config["smtp_from"]
         message["To"] = config["smtp_to"]
@@ -300,14 +350,14 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
         # If smtp_to contains commas, split into a list for the SMTP send call
         recipients = [r.strip() for r in config["smtp_to"].split(",")]
 
-        with smtplib.SMTP(config["smtp_server"], config["smtp_port"]) as server:
+        with smtplib.SMTP(config["smtp_server"], config["smtp_port"], timeout=30) as server:
             server.starttls()
             server.login(config["smtp_user"], config["smtp_pass"])
             server.send_message(message)
 
-        logging.info(f"Summary email sent to {len(recipients)} recipient(s).")
+        logging.info(f"{log_label} sent to {len(recipients)} recipient(s).")
     except Exception as e:
-        logging.error(f"Failed to send summary email: {e}")
+        logging.error(f"Failed to send {log_label.lower()}: {e}")
 
 # --------------------------------------------------------------
 # Build AppEnhancer Metadata
@@ -434,7 +484,7 @@ def fetch_slate_results():
 
     try:
         logging.info("Requesting data from Slate API...")
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=30)
         if response.status_code != 200:
             raise Exception(f"Slate returned status {response.status_code}")
         
@@ -571,111 +621,138 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Resolve AppEnhancer URL components
-    ae_base_url = args.baseurl or config.get("appenhancer_base_url")
-    ae_datasource = args.datasource or config.get("appenhancer_datasource")
-    ae_appid = args.appid or config.get("appenhancer_appid")
-    ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
+    lock_fd = acquire_lock()
 
-    # Resolve Slate material field names
-    slate_file_url_field = config.get("slate_file_url_field", "FileURL")
-    slate_file_name_field = config.get("slate_file_name_field", "FileName")
-    
-    # Construct AppEnhancer URL
-    # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
-    upload_url = f"{ae_base_url}/AXDataSources/{ae_datasource}/AXDocs/{ae_appid}"
-    if ae_urlparams:
-        upload_url += f"?{ae_urlparams}"
-        
-    logging.info(f"Using AppEnhancer URL: {upload_url}")
+    try:
+        # Resolve AppEnhancer URL components
+        ae_base_url = args.baseurl or config.get("appenhancer_base_url")
+        ae_datasource = args.datasource or config.get("appenhancer_datasource")
+        ae_appid = args.appid or config.get("appenhancer_appid")
+        ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
 
-    init_db()
+        # Resolve Slate material field names
+        slate_file_url_field = config.get("slate_file_url_field", "FileURL")
+        slate_file_name_field = config.get("slate_file_name_field", "FileName")
 
-    # 1. Discover New Records
-    slate_rows = fetch_slate_results()
-    if slate_rows and not args.dry_run:
-        upsert_slate_records(slate_rows)
+        # Construct AppEnhancer URL
+        # Format: {base_url}/AXDataSources/{datasource}/AXDocs/{appid}?{params}
+        upload_url = f"{ae_base_url}/AXDataSources/{ae_datasource}/AXDocs/{ae_appid}"
+        if ae_urlparams:
+            upload_url += f"?{ae_urlparams}"
 
-    # 2. Collect Records to Process
-    # Start with existing PENDING/FAILED from DB
-    to_process = get_processable_records()
-    
-    # If dry run, also include new results from Slate (not in DB yet)
-    if args.dry_run and slate_rows:
-        existing_filenames = {r["filename"] for r in to_process}
-        for row in slate_rows:
-            fname = row.get(slate_file_name_field)
-            if fname and fname not in existing_filenames:
-                # Only simulate if NOT already SUCCESS in DB
-                if not is_already_successful(fname):
-                    to_process.append({
-                        "filename": fname,
-                        "raw_json": json.dumps(row),
-                        "status": "PENDING"
-                    })
+        logging.info(f"Using AppEnhancer URL: {upload_url}")
 
-    if not to_process:
-        logging.info("No records to process.")
-        return
+        init_db()
 
-    success_count = 0
-    fail_count = 0
-    duplicate_count = 0
-    success_list = []
-    fail_list = []
-    total = len(to_process)
+        # 1. Discover New Records
+        slate_rows = fetch_slate_results()
+        if slate_rows and not args.dry_run:
+            upsert_slate_records(slate_rows)
 
-    for idx, record in enumerate(to_process, 1):
-        filename = record["filename"]
-        slate_data = json.loads(record["raw_json"])
-        file_url = slate_data.get(slate_file_url_field)
-        prefix = f"[{idx}/{total}] "
+        # 2. Collect Records to Process
+        # Start with existing PENDING/FAILED from DB
+        to_process = get_processable_records()
 
-        logging.info(f"{prefix}Processing {filename}...")
+        # If dry run, also include new results from Slate (not in DB yet)
+        if args.dry_run and slate_rows:
+            existing_filenames = {r["filename"] for r in to_process}
+            for row in slate_rows:
+                fname = row.get(slate_file_name_field)
+                if fname and fname not in existing_filenames:
+                    # Only simulate if NOT already SUCCESS in DB
+                    if not is_already_successful(fname):
+                        to_process.append({
+                            "filename": fname,
+                            "raw_json": json.dumps(row),
+                            "status": "PENDING"
+                        })
 
-        metadata = get_summary_metadata(record)
+        if not to_process:
+            logging.info("No records to process.")
+            return
 
-        # Step A: Download
-        download_result = download_file(file_url, filename)
-        if not download_result["success"]:
-            download_error = download_result["error"]
-            logging.error(f"{prefix}Download failed for {filename}: {download_error}")
-            if not args.dry_run:
-                update_record_status(filename, "DOWNLOAD_FAILED", error=download_error, increment_attempt=True)
-            fail_count += 1
-            fail_list.append({"filename": filename, "error": download_error, **metadata})
-            continue
+        success_count = 0
+        fail_count = 0
+        duplicate_count = 0
+        success_list = []
+        fail_list = []
+        total = len(to_process)
 
-        local_path = download_result["path"]
+        for idx, record in enumerate(to_process, 1):
+            filename = record.get("filename", "UNKNOWN")
+            prefix = f"[{idx}/{total}] "
 
-        # Step B: Upload
-        result = upload_to_appenhancer(record, local_path, upload_url, dry_run=args.dry_run, log_prefix=prefix)
+            try:
+                slate_data = json.loads(record["raw_json"])
+                file_url = slate_data.get(slate_file_url_field)
 
-        if result["success"]:
-            status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
-            if result.get("duplicate"):
-                duplicate_count += 1
-            else:
-                success_count += 1
-                success_list.append({"filename": filename, **metadata})
+                logging.info(f"{prefix}Processing {filename}...")
 
-            if not args.dry_run:
-                update_record_status(filename, status, document_id=result.get("document_id"))
-                archive_file(local_path, record["raw_json"])
-                logging.info(f"{prefix}Processed successfully")
-            else:
-                logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
-        else:
-            fail_count += 1
-            fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
-            logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
-            if not args.dry_run:
-                update_record_status(filename, "UPLOAD_FAILED", error=result.get("error"), increment_attempt=True)
+                metadata = get_summary_metadata(record)
 
-    send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list)
-    cleanup_archives()
-    cleanup_logs()
-    clear_downloads()
+                # Step A: Download
+                download_result = download_file(file_url, filename)
+                if not download_result["success"]:
+                    download_error = download_result["error"]
+                    logging.error(f"{prefix}Download failed for {filename}: {download_error}")
+                    if not args.dry_run:
+                        update_record_status(filename, "DOWNLOAD_FAILED", error=download_error, increment_attempt=True)
+                    fail_count += 1
+                    fail_list.append({"filename": filename, "error": download_error, **metadata})
+                    continue
+
+                local_path = download_result["path"]
+
+                # Step B: Upload
+                result = upload_to_appenhancer(record, local_path, upload_url, dry_run=args.dry_run, log_prefix=prefix)
+
+                if result["success"]:
+                    status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
+                    if result.get("duplicate"):
+                        duplicate_count += 1
+                    else:
+                        success_count += 1
+                        success_list.append({"filename": filename, **metadata})
+
+                    if not args.dry_run:
+                        update_record_status(filename, status, document_id=result.get("document_id"))
+                        archive_file(local_path, record["raw_json"])
+                        logging.info(f"{prefix}Processed successfully")
+                    else:
+                        logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
+                else:
+                    fail_count += 1
+                    fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
+                    logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
+                    if not args.dry_run:
+                        update_record_status(filename, "UPLOAD_FAILED", error=result.get("error"), increment_attempt=True)
+
+            except Exception as e:
+                # Catch anything unexpected (malformed record, DB error, etc.) so one
+                # bad record can't abort processing of the rest of the batch.
+                logging.error(f"{prefix}Unexpected error processing {filename}: {e}", exc_info=True)
+                fail_count += 1
+                fail_list.append({"filename": filename, "error": f"Unexpected error: {e}"})
+                if not args.dry_run:
+                    try:
+                        update_record_status(filename, "ERROR", error=str(e), increment_attempt=True)
+                    except Exception:
+                        logging.error(f"{prefix}Failed to record error status for {filename}", exc_info=True)
+
+        send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list)
+
+    except Exception as e:
+        # Catch anything fatal outside the per-record loop (config/DB init issues,
+        # Slate discovery, etc.) so the run always tries to notify someone and
+        # always reaches the cleanup step below instead of dying silently.
+        logging.critical(f"Fatal error during run: {e}", exc_info=True)
+        send_crash_alert(f"{type(e).__name__}: {e}")
+
+    finally:
+        cleanup_archives()
+        cleanup_logs()
+        clear_downloads()
+        release_lock(lock_fd)
 
 if __name__ == "__main__":
     main()

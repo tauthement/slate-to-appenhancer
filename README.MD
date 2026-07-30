@@ -86,7 +86,7 @@ python3 slatetoappenhancer.py --baseurl "https://prod.school.edu/AppEnhancer/api
 The `records.db` table `records` includes:
 - `id`: Auto-incrementing primary key.
 - `filename`: Unique filename from Slate (marked as UNIQUE).
-- `status`: PENDING, SUCCESS, DOWNLOAD_FAILED, UPLOAD_FAILED, DUPLICATE.
+- `status`: PENDING, SUCCESS, DOWNLOAD_FAILED, UPLOAD_FAILED, DUPLICATE, ERROR (an unexpected exception while processing the record, e.g. malformed data).
 - `attempts`: Number of times the upload was attempted.
 - `raw_json`: The full original record from Slate.
 - **Metadata Columns:** Dynamically added based on your `metadata_mapping`.
@@ -97,6 +97,8 @@ The `records.db` table `records` includes:
 - **Archives:** Successfully processed documents and their `.json` metadata counterparts are stored in the `archive/` directory. Automatically cleaned based on `days_to_keep_archive`.
 - **Downloads:** The `downloads/` directory is automatically cleared at the end of every run.
 - **Schema Updates:** Adding a new field to `metadata_mapping` in `config.json` will automatically add the corresponding column to the SQLite database on the next run.
+- **Single-Instance Lock:** A `.slatetoappenhancer.lock` file in `work_dir` prevents overlapping runs (e.g. if a scheduled run is still in progress when the next one fires). It's an OS-level file lock (POSIX `flock`, so Linux/macOS only), automatically released if the process exits or is killed — no manual cleanup needed.
+- **Crash Notifications:** If the run fails before it can build its usual summary email (e.g. a Slate/DB error), a separate "CRITICAL FAILURE" email is sent instead so the failure isn't silent.
 
 ## Support
 If a record fails repeatedly, check the `last_error` column in `records.db` or the log file for the specific API response from AppEnhancer.
