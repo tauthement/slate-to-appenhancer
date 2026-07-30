@@ -210,11 +210,47 @@ def is_already_successful(filename):
 # --------------------------------------------------------------
 # Email Notification
 # --------------------------------------------------------------
-def send_summary_email(success_count, fail_count, success_list, fail_list):
+SUMMARY_EMAIL_FIELDS = ["student_id", "first_name", "last_name", "term_code", "admissions_req"]
+SUMMARY_EMAIL_HEADERS = ["Filename", "Student ID", "First Name", "Last Name", "Term Code", "Admissions Req"]
+
+def get_summary_metadata(record):
+    """
+    Extract the fields listed in SUMMARY_EMAIL_FIELDS from a record's raw Slate JSON,
+    using the configured metadata_mapping to resolve db_column -> slate_key.
+    """
+    mapping = config.get("metadata_mapping", [])
+    slate_data = json.loads(record["raw_json"])
+
+    metadata = {}
+    for col in SUMMARY_EMAIL_FIELDS:
+        entry = next((m for m in mapping if m["db_column"] == col), None)
+        val = clean_value(slate_data.get(entry["slate_key"])) if entry else None
+        metadata[col] = val if val is not None else ""
+
+    return metadata
+
+def format_table(headers, rows):
+    """
+    Render a simple aligned, plain-text table from a list of header strings
+    and a list of rows (each row a list of cell values, same length as headers).
+    """
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
+
+    def fmt_row(cells):
+        return " | ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
+
+    lines = [fmt_row(headers), "-+-".join("-" * w for w in widths)]
+    lines.extend(fmt_row(row) for row in rows)
+    return "\n".join(lines)
+
+def send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list):
     """
     Send a summary email at the end of the run with stats and details.
     """
-    if success_count == 0 and fail_count == 0:
+    if success_count == 0 and fail_count == 0 and duplicate_count == 0:
         logging.info("No records processed; skipping summary email.")
         return
 
@@ -229,21 +265,28 @@ def send_summary_email(success_count, fail_count, success_list, fail_list):
         f"Slate to AE Import Summary",
         f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"--------------------------------------------------",
-        f"Total Successes: {success_count}",
-        f"Total Failures:  {fail_count}",
+        f"Total Successes:  {success_count}",
+        f"Total Duplicates: {duplicate_count}",
+        f"Total Failures:   {fail_count}",
         f"--------------------------------------------------\n"
     ]
 
     if success_list:
         body_lines.append("SUCCESSFUL UPLOADS:")
-        for item in success_list:
-            body_lines.append(f" - {item}")
+        rows = [
+            [item["filename"]] + [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS]
+            for item in success_list
+        ]
+        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS, rows))
         body_lines.append("")
 
     if fail_list:
         body_lines.append("FAILED UPLOADS:")
-        for item in fail_list:
-            body_lines.append(f" - {item}")
+        rows = [
+            [item["filename"]] + [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item.get("error", "")]
+            for item in fail_list
+        ]
+        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Error"], rows))
         body_lines.append("")
 
     msg_text = "\n".join(body_lines)
@@ -321,6 +364,7 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_pre
         return {"success": True, "document_id": None}
 
     metadata = build_appenhancer_metadata(record)
+    last_error = None
 
     for attempt in range(1, attempts + 1):
         logging.info(f"{log_prefix}AppEnhancer upload attempt {attempt}/{attempts} for {filename}")
@@ -369,15 +413,17 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_pre
                 logging.warning(f"{log_prefix}Duplicate detected for {filename}. Treating as success.")
                 return {"success": True, "document_id": None, "duplicate": True}
 
+            last_error = f"HTTP {response.status_code}: {resp_json.get('Message', response.text)}"
             logging.warning(f"{log_prefix}Upload failed ({response.status_code}): {response.text}")
 
         except Exception as e:
+            last_error = str(e)
             logging.error(f"{log_prefix}Upload exception for {filename}: {e}")
 
         if attempt < attempts:
             time.sleep(delay)
 
-    return {"success": False, "error": "Upload failed after retries"}
+    return {"success": False, "error": last_error or "Upload failed after retries"}
 
 # --------------------------------------------------------------
 # Fetch Slate Data
@@ -406,10 +452,11 @@ def fetch_slate_results():
 def download_file(url, filename):
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     if os.path.exists(filepath):
-        return filepath
+        return {"success": True, "path": filepath, "error": None}
 
     attempts = config.get("download_retry_attempts", 5)
     delay = config.get("download_retry_delay", 5)
+    last_error = None
 
     for attempt in range(1, attempts + 1):
         try:
@@ -418,13 +465,15 @@ def download_file(url, filename):
                 with open(filepath, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
-                return filepath
+                return {"success": True, "path": filepath, "error": None}
+            last_error = f"HTTP {r.status_code}"
         except Exception as e:
+            last_error = str(e)
             logging.warning(f"Download error for {filename}: {e}")
-        
+
         if attempt < attempts:
             time.sleep(delay)
-    return None
+    return {"success": False, "path": None, "error": last_error or "Download failed after retries"}
 
 # --------------------------------------------------------------
 # Archive & Cleanup
@@ -571,6 +620,7 @@ def main():
 
     success_count = 0
     fail_count = 0
+    duplicate_count = 0
     success_list = []
     fail_list = []
     total = len(to_process)
@@ -583,23 +633,31 @@ def main():
 
         logging.info(f"{prefix}Processing {filename}...")
 
+        metadata = get_summary_metadata(record)
+
         # Step A: Download
-        local_path = download_file(file_url, filename)
-        if not local_path:
-            logging.error(f"{prefix}Download failed for {filename}")
+        download_result = download_file(file_url, filename)
+        if not download_result["success"]:
+            download_error = download_result["error"]
+            logging.error(f"{prefix}Download failed for {filename}: {download_error}")
             if not args.dry_run:
-                update_record_status(filename, "DOWNLOAD_FAILED", error="Failed to download file", increment_attempt=True)
+                update_record_status(filename, "DOWNLOAD_FAILED", error=download_error, increment_attempt=True)
             fail_count += 1
-            fail_list.append(f"{filename} (Download Error)")
+            fail_list.append({"filename": filename, "error": download_error, **metadata})
             continue
+
+        local_path = download_result["path"]
 
         # Step B: Upload
         result = upload_to_appenhancer(record, local_path, upload_url, dry_run=args.dry_run, log_prefix=prefix)
-        
+
         if result["success"]:
             status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
-            success_count += 1
-            success_list.append(filename)
+            if result.get("duplicate"):
+                duplicate_count += 1
+            else:
+                success_count += 1
+                success_list.append({"filename": filename, **metadata})
 
             if not args.dry_run:
                 update_record_status(filename, status, document_id=result.get("document_id"))
@@ -609,12 +667,12 @@ def main():
                 logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
         else:
             fail_count += 1
-            fail_list.append(f"{filename} ({result.get('error')})")
+            fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
             logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
             if not args.dry_run:
                 update_record_status(filename, "UPLOAD_FAILED", error=result.get("error"), increment_attempt=True)
 
-    send_summary_email(success_count, fail_count, success_list, fail_list)
+    send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list)
     cleanup_archives()
     cleanup_logs()
     clear_downloads()
