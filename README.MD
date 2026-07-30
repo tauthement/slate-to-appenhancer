@@ -48,7 +48,9 @@ The script relies on a `config.json` file. Use `config.example.json` as a templa
 - **Cleanup Settings:**
     - `days_to_keep_archive`: Number of days to retain archived documents.
     - `days_to_keep_logs`: Number of days to retain log files.
-- **Metadata Mapping:** Defines how Slate JSON keys map to AppEnhancer Field IDs and SQLite database columns.
+- **Retry Settings:**
+    - `max_attempts`: Maximum number of times a record will be retried across runs before it's marked `FAILED_PERMANENT` and stops being retried or reported as a failure. `0` (the default) means unlimited retries.
+- **Metadata Mapping:** Defines how Slate JSON keys map to AppEnhancer Field IDs and SQLite database columns. Each `db_column` must be a valid SQL identifier (letters, digits, underscores; can't start with a digit) and can't reuse a core column name (`id`, `filename`, `status`, `document_id`, `attempts`, `last_error`, `first_seen_at`, `last_attempt_at`, `uploaded_at`, `raw_json`) — the script validates this at startup and fails fast with a clear error if violated.
 
 ```json
 "metadata_mapping": [
@@ -86,7 +88,7 @@ python3 slatetoappenhancer.py --baseurl "https://prod.school.edu/AppEnhancer/api
 The `records.db` table `records` includes:
 - `id`: Auto-incrementing primary key.
 - `filename`: Unique filename from Slate (marked as UNIQUE).
-- `status`: PENDING, SUCCESS, DOWNLOAD_FAILED, UPLOAD_FAILED, DUPLICATE, ERROR (an unexpected exception while processing the record, e.g. malformed data).
+- `status`: PENDING, SUCCESS, DOWNLOAD_FAILED, UPLOAD_FAILED, DUPLICATE, ERROR (an unexpected exception while processing the record, e.g. malformed data), FAILED_PERMANENT (hit `max_attempts`; no longer retried).
 - `attempts`: Number of times the upload was attempted.
 - `raw_json`: The full original record from Slate.
 - **Metadata Columns:** Dynamically added based on your `metadata_mapping`.

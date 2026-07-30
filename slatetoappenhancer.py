@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import sys
 import fcntl
 import json
@@ -11,6 +12,7 @@ from requests.auth import HTTPBasicAuth
 import sqlite3
 import smtplib
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 import argparse
@@ -95,43 +97,81 @@ def release_lock(lock_fd):
 # --------------------------------------------------------------
 # SQLite Setup & Dynamic Schema
 # --------------------------------------------------------------
+@contextmanager
+def db_connection():
+    """
+    Yield a SQLite connection, committing on clean exit and always
+    closing the connection, even if an exception is raised.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+# Reserved so a metadata_mapping db_column can't silently shadow a core column.
+RESERVED_COLUMNS = {
+    "id", "filename", "status", "document_id", "attempts",
+    "last_error", "first_seen_at", "last_attempt_at", "uploaded_at", "raw_json"
+}
+VALID_COLUMN_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+def validate_metadata_mapping():
+    """
+    Validate that every configured db_column is a safe SQL identifier and
+    doesn't collide with a core records column, before it's used to build
+    ALTER TABLE / INSERT statements via string formatting.
+    """
+    for entry in config.get("metadata_mapping", []):
+        col = entry.get("db_column", "")
+        if not VALID_COLUMN_PATTERN.match(col):
+            raise ValueError(
+                f"Invalid metadata_mapping db_column {col!r}: must contain only "
+                "letters, digits, and underscores, and not start with a digit."
+            )
+        if col.lower() in RESERVED_COLUMNS:
+            raise ValueError(
+                f"Invalid metadata_mapping db_column {col!r}: collides with a "
+                "reserved records table column."
+            )
+
 def init_db():
     """
     Initialize the SQLite database and ensure all metadata columns from config exist.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Create base table with ID as Primary Key and filename as UNIQUE
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT UNIQUE,
-            status TEXT DEFAULT 'PENDING',
-            document_id TEXT,
-            attempts INTEGER DEFAULT 0,
-            last_error TEXT,
-            first_seen_at DATETIME,
-            last_attempt_at DATETIME,
-            uploaded_at DATETIME,
-            raw_json TEXT
-        )
-    """)
-    
-    # Check for existing columns to avoid redundant ALTER TABLE calls
-    cursor.execute("PRAGMA table_info(records)")
-    existing_columns = [row[1] for row in cursor.fetchall()]
-    
-    # Add metadata columns defined in config if they don't exist
-    mapping = config.get("metadata_mapping", [])
-    for entry in mapping:
-        col = entry["db_column"]
-        if col not in existing_columns:
-            logging.info(f"Adding new metadata column to DB: {col}")
-            cursor.execute(f"ALTER TABLE records ADD COLUMN {col} TEXT")
-            
-    conn.commit()
-    conn.close()
+    validate_metadata_mapping()
+
+    with db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Create base table with ID as Primary Key and filename as UNIQUE
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT UNIQUE,
+                status TEXT DEFAULT 'PENDING',
+                document_id TEXT,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                first_seen_at DATETIME,
+                last_attempt_at DATETIME,
+                uploaded_at DATETIME,
+                raw_json TEXT
+            )
+        """)
+
+        # Check for existing columns to avoid redundant ALTER TABLE calls
+        cursor.execute("PRAGMA table_info(records)")
+        existing_columns = [row[1] for row in cursor.fetchall()]
+
+        # Add metadata columns defined in config if they don't exist
+        mapping = config.get("metadata_mapping", [])
+        for entry in mapping:
+            col = entry["db_column"]
+            if col not in existing_columns:
+                logging.info(f"Adding new metadata column to DB: {col}")
+                cursor.execute(f"ALTER TABLE records ADD COLUMN {col} TEXT")
 
 def clean_value(val):
     """
@@ -150,94 +190,104 @@ def clean_value(val):
         return json.dumps(val)
     return str(val)
 
+def sanitize_filename(filename):
+    """
+    Reduce a Slate-provided filename to a bare basename so it can't be used
+    to write outside DOWNLOAD_DIR/ARCHIVE_DIR (e.g. via '../' or an absolute path).
+    """
+    return os.path.basename(filename) if filename else filename
+
 def upsert_slate_records(rows):
     """
     Insert or Update discovered records from Slate.
     Only inserts if the filename is new to avoid resetting status/attempts.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     now_ts = datetime.now(timezone.utc).isoformat()
     mapping = config.get("metadata_mapping", [])
     slate_file_name_field = config.get("slate_file_name_field", "FileName")
-    
-    for row in rows:
-        filename = row.get(slate_file_name_field)
-        if not filename:
-            continue
-            
-        # Core columns for insertion
-        cols = ["filename", "first_seen_at", "raw_json"]
-        vals = [filename, now_ts, json.dumps(row)]
-        
-        # Add metadata columns from the row
-        for entry in mapping:
-            cols.append(entry["db_column"])
-            vals.append(clean_value(row.get(entry["slate_key"])))
-            
-        placeholders = ", ".join(["?"] * len(cols))
-        query = f"INSERT OR IGNORE INTO records ({', '.join(cols)}) VALUES ({placeholders})"
-        
-        cursor.execute(query, vals)
-        
-    conn.commit()
-    conn.close()
+
+    with db_connection() as conn:
+        cursor = conn.cursor()
+
+        for row in rows:
+            filename = sanitize_filename(row.get(slate_file_name_field))
+            if not filename:
+                continue
+
+            # Core columns for insertion
+            cols = ["filename", "first_seen_at", "raw_json"]
+            vals = [filename, now_ts, json.dumps(row)]
+
+            # Add metadata columns from the row
+            for entry in mapping:
+                cols.append(entry["db_column"])
+                vals.append(clean_value(row.get(entry["slate_key"])))
+
+            placeholders = ", ".join(["?"] * len(cols))
+            query = f"INSERT OR IGNORE INTO records ({', '.join(cols)}) VALUES ({placeholders})"
+
+            cursor.execute(query, vals)
 
 def update_record_status(filename, status, document_id=None, error=None, increment_attempt=False):
     """
     Update the processing status of a record.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     now_ts = datetime.now(timezone.utc).isoformat()
-    
+
     updates = ["status = ?", "last_attempt_at = ?"]
     params = [status, now_ts]
-    
+
     if document_id:
         updates.append("document_id = ?")
         params.append(str(document_id))
-    
+
     if status == "SUCCESS":
         updates.append("uploaded_at = ?")
         params.append(now_ts)
-            
+
     if error:
         updates.append("last_error = ?")
         params.append(str(error))
-        
+
     if increment_attempt:
         updates.append("attempts = attempts + 1")
-        
+
     params.append(filename)
     query = f"UPDATE records SET {', '.join(updates)} WHERE filename = ?"
-    
-    cursor.execute(query, params)
-    conn.commit()
-    conn.close()
+
+    with db_connection() as conn:
+        conn.execute(query, params)
+
+def resolve_failure_status(record, fallback_status):
+    """
+    Return fallback_status normally, or FAILED_PERMANENT if this failure would
+    push the record's attempt count to/past the configured max_attempts.
+    max_attempts defaults to 0 (unlimited retries).
+    """
+    max_attempts = config.get("max_attempts", 0)
+    if max_attempts > 0 and record.get("attempts", 0) + 1 >= max_attempts:
+        return "FAILED_PERMANENT"
+    return fallback_status
 
 def get_processable_records():
     """
-    Retrieve records that are not yet successfully uploaded.
+    Retrieve records that are not yet successfully uploaded and haven't
+    permanently failed.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM records WHERE status NOT IN ('SUCCESS', 'DUPLICATE')")
-    rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return rows
+    with db_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM records WHERE status NOT IN ('SUCCESS', 'DUPLICATE', 'FAILED_PERMANENT')")
+        return [dict(row) for row in cursor.fetchall()]
 
 def is_already_successful(filename):
     """
     Check if a filename is already recorded as SUCCESS or DUPLICATE in the DB.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM records WHERE filename = ? AND status IN ('SUCCESS', 'DUPLICATE')", (filename,))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM records WHERE filename = ? AND status IN ('SUCCESS', 'DUPLICATE')", (filename,))
+        return cursor.fetchone() is not None
 
 # --------------------------------------------------------------
 # Email Notification
@@ -448,15 +498,18 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_pre
                 doc_id = None
                 try:
                     doc_id = response.json().get("ID")
-                except: pass
-                
+                except Exception:
+                    pass
+
                 logging.info(f"{log_prefix}AppEnhancer upload success: {filename} | ID={doc_id}")
                 return {"success": True, "document_id": doc_id}
-            
+
             # Check for Duplicate Index (Error 125)
             resp_json = {}
-            try: resp_json = response.json()
-            except: pass
+            try:
+                resp_json = response.json()
+            except Exception:
+                pass
 
             error_code = resp_json.get("ErrorCode")
             if error_code == 125 or "duplicate index" in str(resp_json.get("Message", "")).lower():
@@ -657,7 +710,7 @@ def main():
         if args.dry_run and slate_rows:
             existing_filenames = {r["filename"] for r in to_process}
             for row in slate_rows:
-                fname = row.get(slate_file_name_field)
+                fname = sanitize_filename(row.get(slate_file_name_field))
                 if fname and fname not in existing_filenames:
                     # Only simulate if NOT already SUCCESS in DB
                     if not is_already_successful(fname):
@@ -696,7 +749,10 @@ def main():
                     download_error = download_result["error"]
                     logging.error(f"{prefix}Download failed for {filename}: {download_error}")
                     if not args.dry_run:
-                        update_record_status(filename, "DOWNLOAD_FAILED", error=download_error, increment_attempt=True)
+                        final_status = resolve_failure_status(record, "DOWNLOAD_FAILED")
+                        update_record_status(filename, final_status, error=download_error, increment_attempt=True)
+                        if final_status == "FAILED_PERMANENT":
+                            logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
                     fail_count += 1
                     fail_list.append({"filename": filename, "error": download_error, **metadata})
                     continue
@@ -708,34 +764,45 @@ def main():
 
                 if result["success"]:
                     status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
+
+                    if not args.dry_run:
+                        # Archive before recording SUCCESS/DUPLICATE: if the archive
+                        # move fails, we want this record to end up as a single
+                        # failure (via the outer except below), not double-counted
+                        # as both a success and a failure with a stale DB status.
+                        archive_file(local_path, record["raw_json"])
+                        update_record_status(filename, status, document_id=result.get("document_id"))
+                        logging.info(f"{prefix}Processed successfully")
+                    else:
+                        logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
+
                     if result.get("duplicate"):
                         duplicate_count += 1
                     else:
                         success_count += 1
                         success_list.append({"filename": filename, **metadata})
-
-                    if not args.dry_run:
-                        update_record_status(filename, status, document_id=result.get("document_id"))
-                        archive_file(local_path, record["raw_json"])
-                        logging.info(f"{prefix}Processed successfully")
-                    else:
-                        logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
                 else:
                     fail_count += 1
                     fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
                     logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
                     if not args.dry_run:
-                        update_record_status(filename, "UPLOAD_FAILED", error=result.get("error"), increment_attempt=True)
+                        final_status = resolve_failure_status(record, "UPLOAD_FAILED")
+                        update_record_status(filename, final_status, error=result.get("error"), increment_attempt=True)
+                        if final_status == "FAILED_PERMANENT":
+                            logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
 
             except Exception as e:
-                # Catch anything unexpected (malformed record, DB error, etc.) so one
-                # bad record can't abort processing of the rest of the batch.
+                # Catch anything unexpected (malformed record, DB error, archive
+                # failure, etc.) so one bad record can't abort the rest of the batch.
                 logging.error(f"{prefix}Unexpected error processing {filename}: {e}", exc_info=True)
                 fail_count += 1
                 fail_list.append({"filename": filename, "error": f"Unexpected error: {e}"})
                 if not args.dry_run:
                     try:
-                        update_record_status(filename, "ERROR", error=str(e), increment_attempt=True)
+                        final_status = resolve_failure_status(record, "ERROR")
+                        update_record_status(filename, final_status, error=str(e), increment_attempt=True)
+                        if final_status == "FAILED_PERMANENT":
+                            logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
                     except Exception:
                         logging.error(f"{prefix}Failed to record error status for {filename}", exc_info=True)
 

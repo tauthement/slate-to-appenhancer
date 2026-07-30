@@ -21,6 +21,8 @@
   "appenhancer_retry_attempts": 3,
   "appenhancer_retry_delay": 5,
 
+  "max_attempts": 0,
+
   "days_to_keep_archive": 30,
   "days_to_keep_logs": 30,
 
