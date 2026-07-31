@@ -293,7 +293,16 @@ def is_already_successful(filename):
 # Email Notification
 # --------------------------------------------------------------
 SUMMARY_EMAIL_FIELDS = ["student_id", "first_name", "last_name", "term_code", "admissions_req"]
-SUMMARY_EMAIL_HEADERS = ["Filename", "Student ID", "First Name", "Last Name", "Term Code", "Admissions Req"]
+SUMMARY_EMAIL_HEADERS = ["Student ID", "First Name", "Last Name", "Term Code", "Admissions Req"]
+SUMMARY_EMAIL_COLUMN_WIDTHS = {
+    "Student ID": 12,
+    "First Name": 15,
+    "Last Name": 15,
+    "Term Code": 10,
+    "Admissions Req": 16,
+    "Filename": 30,
+    "Error": 40,
+}
 
 def get_summary_metadata(record):
     """
@@ -311,18 +320,35 @@ def get_summary_metadata(record):
 
     return metadata
 
-def format_table(headers, rows):
+def format_log_metadata(metadata, status=None):
+    """
+    Format a get_summary_metadata() dict plus an optional status into a
+    single "status=... | student_id=... | ..." string for inclusion in
+    per-record console/log lines.
+    """
+    parts = [f"status={status}"] if status is not None else []
+    parts.extend(f"{field}={metadata.get(field, '')}" for field in SUMMARY_EMAIL_FIELDS)
+    return " | ".join(parts)
+
+def format_table(headers, rows, column_widths=None):
     """
     Render a simple aligned, plain-text table from a list of header strings
     and a list of rows (each row a list of cell values, same length as headers).
+    If column_widths (a header -> width dict) is given, every column uses that
+    fixed width, truncating over-long values, so tables line up consistently
+    between emails regardless of content length. Otherwise widths are computed
+    from the longest header/cell, as before.
     """
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
+    if column_widths:
+        widths = [column_widths.get(h, len(h)) for h in headers]
+    else:
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(str(cell)))
 
     def fmt_row(cells):
-        return " | ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
+        return " | ".join(str(c)[:widths[i]].ljust(widths[i]) for i, c in enumerate(cells))
 
     lines = [fmt_row(headers), "-+-".join("-" * w for w in widths)]
     lines.extend(fmt_row(row) for row in rows)
@@ -356,19 +382,19 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
     if success_list:
         body_lines.append("SUCCESSFUL UPLOADS:")
         rows = [
-            [item["filename"]] + [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS]
+            [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"]]
             for item in success_list
         ]
-        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS, rows))
+        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Filename"], rows, SUMMARY_EMAIL_COLUMN_WIDTHS))
         body_lines.append("")
 
     if fail_list:
         body_lines.append("FAILED UPLOADS:")
         rows = [
-            [item["filename"]] + [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item.get("error", "")]
+            [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"], item.get("error", "")]
             for item in fail_list
         ]
-        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Error"], rows))
+        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Filename", "Error"], rows, SUMMARY_EMAIL_COLUMN_WIDTHS))
         body_lines.append("")
 
     msg_text = "\n".join(body_lines)
@@ -401,8 +427,10 @@ def _send_email(subject, body, log_label="Email"):
         recipients = [r.strip() for r in config["smtp_to"].split(",")]
 
         with smtplib.SMTP(config["smtp_server"], config["smtp_port"], timeout=30) as server:
-            server.starttls()
-            server.login(config["smtp_user"], config["smtp_pass"])
+            if config.get("smtp_use_tls", True):
+                server.starttls()
+            if config.get("smtp_user"):
+                server.login(config["smtp_user"], config["smtp_pass"])
             server.send_message(message)
 
         logging.info(f"{log_label} sent to {len(recipients)} recipient(s).")
@@ -718,6 +746,8 @@ def main():
     parser = argparse.ArgumentParser(description="Slate to AppEnhancer Import Script")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int, metavar="N",
+                         help="Process at most N records, for testing purposes.")
 
     # AppEnhancer Overrides
     parser.add_argument("--baseurl", help="Override AppEnhancer Base URL")
@@ -789,6 +819,14 @@ def main():
                             "status": "PENDING"
                         })
 
+        # Optional test-run limit (--limit)
+        if args.limit is not None and args.limit > 0 and len(to_process) > args.limit:
+            logging.info(
+                f"--limit is set to {args.limit}; "
+                f"processing {args.limit} of {len(to_process)} available records."
+            )
+            to_process = to_process[:args.limit]
+
         if not to_process:
             logging.info("No records to process.")
             return
@@ -803,25 +841,27 @@ def main():
         for idx, record in enumerate(to_process, 1):
             filename = record.get("filename", "UNKNOWN")
             prefix = f"[{idx}/{total}] "
+            metadata = {}
 
             try:
+                metadata = get_summary_metadata(record)
                 slate_data = json.loads(record["raw_json"])
                 file_url = slate_data.get(slate_file_url_field)
 
-                logging.info(f"{prefix}Processing {filename}...")
-
-                metadata = get_summary_metadata(record)
+                logging.info(f"{prefix}Processing {filename}... | {format_log_metadata(metadata, record.get('status', 'PENDING'))}")
 
                 # Step A: Download
                 download_result = download_file(file_url, filename)
                 if not download_result["success"]:
                     download_error = download_result["error"]
-                    logging.error(f"{prefix}Download failed for {filename}: {download_error}")
                     if not args.dry_run:
                         final_status = resolve_failure_status(record, "DOWNLOAD_FAILED")
                         update_record_status(filename, final_status, error=download_error, increment_attempt=True)
-                        if final_status == "FAILED_PERMANENT":
-                            logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
+                    else:
+                        final_status = "DOWNLOAD_FAILED"
+                    logging.error(f"{prefix}Download failed for {filename}: {download_error} | {format_log_metadata(metadata, final_status)}")
+                    if not args.dry_run and final_status == "FAILED_PERMANENT":
+                        logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
                     fail_count += 1
                     fail_list.append({"filename": filename, "error": download_error, **metadata})
                     continue
@@ -841,9 +881,9 @@ def main():
                         # as both a success and a failure with a stale DB status.
                         archive_file(local_path, record["raw_json"])
                         update_record_status(filename, status, document_id=result.get("document_id"))
-                        logging.info(f"{prefix}Processed successfully")
+                        logging.info(f"{prefix}Processed successfully | {format_log_metadata(metadata, status)}")
                     else:
-                        logging.info(f"{prefix}DRY RUN: {filename} processed successfully")
+                        logging.info(f"{prefix}DRY RUN: {filename} processed successfully | {format_log_metadata(metadata, status)}")
 
                     if result.get("duplicate"):
                         duplicate_count += 1
@@ -851,21 +891,23 @@ def main():
                         success_count += 1
                         success_list.append({"filename": filename, **metadata})
                 else:
-                    fail_count += 1
-                    fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
-                    logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')}")
                     if not args.dry_run:
                         final_status = resolve_failure_status(record, "UPLOAD_FAILED")
                         update_record_status(filename, final_status, error=result.get("error"), increment_attempt=True)
-                        if final_status == "FAILED_PERMANENT":
-                            logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
+                    else:
+                        final_status = "UPLOAD_FAILED"
+                    fail_count += 1
+                    fail_list.append({"filename": filename, "error": result.get("error"), **metadata})
+                    logging.error(f"{prefix}Upload failed for {filename}: {result.get('error')} | {format_log_metadata(metadata, final_status)}")
+                    if not args.dry_run and final_status == "FAILED_PERMANENT":
+                        logging.error(f"{prefix}{filename} reached max_attempts; marking as permanently failed.")
 
             except Exception as e:
                 # Catch anything unexpected (malformed record, DB error, archive
                 # failure, etc.) so one bad record can't abort the rest of the batch.
-                logging.error(f"{prefix}Unexpected error processing {filename}: {e}", exc_info=True)
+                logging.error(f"{prefix}Unexpected error processing {filename}: {e} | {format_log_metadata(metadata, 'ERROR')}", exc_info=True)
                 fail_count += 1
-                fail_list.append({"filename": filename, "error": f"Unexpected error: {e}"})
+                fail_list.append({"filename": filename, "error": f"Unexpected error: {e}", **metadata})
                 if not args.dry_run:
                     try:
                         final_status = resolve_failure_status(record, "ERROR")

@@ -28,6 +28,7 @@
 
   "smtp_server": "smtp.yourdomain.edu",
   "smtp_port": 587,
+  "smtp_use_tls": true,
   "smtp_user": "smtp_user@yourdomain.edu",
   "smtp_pass": "smtp_password",
   "smtp_from": "slate-bdm@yourdomain.edu",
