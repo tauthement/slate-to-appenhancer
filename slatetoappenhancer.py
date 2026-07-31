@@ -115,7 +115,7 @@ def db_connection():
 
 # Reserved so a metadata_mapping db_column can't silently shadow a core column.
 RESERVED_COLUMNS = {
-    "id", "filename", "status", "document_id", "attempts",
+    "id", "filename", "status", "document_id", "document_url", "attempts",
     "last_error", "first_seen_at", "last_attempt_at", "uploaded_at", "raw_json"
 }
 VALID_COLUMN_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -155,6 +155,7 @@ def init_db():
                 filename TEXT UNIQUE,
                 status TEXT DEFAULT 'PENDING',
                 document_id TEXT,
+                document_url TEXT,
                 attempts INTEGER DEFAULT 0,
                 last_error TEXT,
                 first_seen_at DATETIME,
@@ -167,6 +168,12 @@ def init_db():
         # Check for existing columns to avoid redundant ALTER TABLE calls
         cursor.execute("PRAGMA table_info(records)")
         existing_columns = [row[1] for row in cursor.fetchall()]
+
+        # Add core columns introduced after the initial release, if missing
+        if "document_url" not in existing_columns:
+            logging.info("Adding new column to DB: document_url")
+            cursor.execute("ALTER TABLE records ADD COLUMN document_url TEXT")
+            existing_columns.append("document_url")
 
         # Add metadata columns defined in config if they don't exist
         mapping = config.get("metadata_mapping", [])
@@ -231,7 +238,7 @@ def upsert_slate_records(rows):
 
             cursor.execute(query, vals)
 
-def update_record_status(filename, status, document_id=None, error=None, increment_attempt=False):
+def update_record_status(filename, status, document_id=None, document_url=None, error=None, increment_attempt=False):
     """
     Update the processing status of a record.
     """
@@ -243,6 +250,10 @@ def update_record_status(filename, status, document_id=None, error=None, increme
     if document_id:
         updates.append("document_id = ?")
         params.append(str(document_id))
+
+    if document_url:
+        updates.append("document_url = ?")
+        params.append(document_url)
 
     if status == "SUCCESS":
         updates.append("uploaded_at = ?")
@@ -341,7 +352,7 @@ def format_table(headers, rows):
     lines.extend(fmt_row(row) for row in rows)
     return "\n".join(lines)
 
-def format_html_table(headers, rows):
+def format_html_table(headers, rows, raw_html_columns=None):
     """
     Render headers/rows as a real HTML <table>, so columns line up
     regardless of the email client's font - unlike space-padded
@@ -351,14 +362,22 @@ def format_html_table(headers, rows):
     a 1px cellspacing gap) rather than the CSS `border` property, since some
     mail clients render `border` on individual cells unreliably (dropping a
     hairline segment here and there).
+
+    raw_html_columns is a set of header names whose cell values are already
+    safe, pre-built HTML (e.g. an <a> tag) and should be inserted as-is
+    instead of being escaped like ordinary text values.
     """
+    raw_html_columns = raw_html_columns or set()
     border_color = "#cccccc"
     header_style = "padding: 4px 8px; text-align: left; font-weight: bold; background-color: #f2f2f2;"
     cell_style = "padding: 4px 8px; text-align: left; max-width: 320px; word-break: break-word; background-color: #ffffff;"
 
     thead = "".join(f'<td style="{header_style}">{html.escape(str(h))}</td>' for h in headers)
     tbody = "".join(
-        "<tr>" + "".join(f'<td style="{cell_style}">{html.escape(str(c))}</td>' for c in row) + "</tr>"
+        "<tr>" + "".join(
+            f'<td style="{cell_style}">{cell if headers[i] in raw_html_columns else html.escape(str(cell))}</td>'
+            for i, cell in enumerate(row)
+        ) + "</tr>"
         for row in rows
     )
     return (
@@ -366,6 +385,29 @@ def format_html_table(headers, rows):
         f'style="background-color: {border_color}; font-family: Arial, sans-serif; font-size: 13px;">'
         f"<tr>{thead}</tr>{tbody}</table>"
     )
+
+def defeat_entity_detection(value):
+    """
+    Insert a zero-width space after the first character of value. Some mail
+    clients (e.g. Gmail) auto-detect phone/tracking-number-like strings and
+    highlight them as clickable "smart chips"; student IDs (a letter plus a
+    run of digits) occasionally trip that heuristic. The zero-width space
+    is invisible to the reader but breaks the pattern match. HTML display
+    only - never applied to plain-text output or stored/compared values.
+    """
+    value = str(value)
+    zero_width_space = "\u200b"
+    return value[:1] + zero_width_space + value[1:] if len(value) > 1 else value
+
+def html_metadata_cells(item):
+    """
+    Build the SUMMARY_EMAIL_FIELDS cell values for an HTML table row.
+    """
+    cells = []
+    for col in SUMMARY_EMAIL_FIELDS:
+        val = item.get(col, "")
+        cells.append(defeat_entity_detection(val) if col == "student_id" else val)
+    return cells
 
 def send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list):
     """
@@ -407,32 +449,43 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
     ]
 
     if success_list:
+        headers = SUMMARY_EMAIL_HEADERS + ["Filename", "Document Link"]
+
         rows = [
-            [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"]]
+            [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"], item.get("document_url", "")]
             for item in success_list
         ]
-        headers = SUMMARY_EMAIL_HEADERS + ["Filename"]
-
         body_lines.append("SUCCESSFUL UPLOADS:")
         body_lines.append(format_table(headers, rows))
         body_lines.append("")
 
+        html_rows = [
+            html_metadata_cells(item) + [
+                item["filename"],
+                f'<a href="{html.escape(item["document_url"])}">Document ID {html.escape(str(item["document_id"]))}</a>' if item.get("document_url") else "",
+            ]
+            for item in success_list
+        ]
         html_parts.append("<p><b>Successful Uploads</b></p>")
-        html_parts.append(format_html_table(headers, rows))
+        html_parts.append(format_html_table(headers, html_rows, raw_html_columns={"Document Link"}))
 
     if fail_list:
+        headers = SUMMARY_EMAIL_HEADERS + ["Filename", "Error"]
+
         rows = [
             [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"], item.get("error", "")]
             for item in fail_list
         ]
-        headers = SUMMARY_EMAIL_HEADERS + ["Filename", "Error"]
-
         body_lines.append("FAILED UPLOADS:")
         body_lines.append(format_table(headers, rows))
         body_lines.append("")
 
+        html_rows = [
+            html_metadata_cells(item) + [item["filename"], item.get("error", "")]
+            for item in fail_list
+        ]
         html_parts.append("<p><b>Failed Uploads</b></p>")
-        html_parts.append(format_html_table(headers, rows))
+        html_parts.append(format_html_table(headers, html_rows))
 
     msg_text = "\n".join(body_lines)
     msg_html = "\n".join(html_parts)
@@ -531,12 +584,26 @@ def build_appenhancer_metadata(record_row):
         "SubmitFullText": False
     }
 
+def build_document_url(document_id, datasource, appid):
+    """
+    Build a link to the document in the AppEnhancer web UI, e.g.:
+    https://appenhancer.yourschool.edu/datasources/PROD/applications/509/document/131551
+    Returns None if appenhancer_document_base_url isn't configured or there's
+    no document_id (e.g. dry runs, or duplicates where AppEnhancer didn't
+    hand back an ID).
+    """
+    base_url = config.get("appenhancer_document_base_url")
+    if not base_url or not document_id:
+        return None
+    return f"{base_url.rstrip('/')}/datasources/{datasource}/applications/{appid}/document/{document_id}"
+
 # --------------------------------------------------------------
 # AppEnhancer Upload
 # --------------------------------------------------------------
 def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_prefix=""):
-    attempts = config.get("appenhancer_retry_attempts", 3)
-    delay = config.get("appenhancer_retry_delay", 5) 
+    attempts = config.get("appenhancer_api_retry_attempts", 3)
+    delay = config.get("appenhancer_api_retry_delay", 5)
+    debug = config.get("debug", False)
     filename = record["filename"]
 
     if dry_run:
@@ -566,23 +633,31 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_pre
 
                 response = requests.post(
                     upload_url,
-                    files=files, 
+                    files=files,
                     auth=HTTPBasicAuth(
-                        config["appenhancer_user"],
-                        config["appenhancer_pass"]
+                        config["appenhancer_api_user"],
+                        config["appenhancer_api_pass"]
                     ),
                     timeout=60
                 )
 
+            if debug:
+                logging.info(f"{log_prefix}AppEnhancer full response ({response.status_code}) for {filename}: {response.text}")
+
             if response.status_code in (200, 201):
                 doc_id = None
+                resp_json = {}
                 try:
-                    doc_id = response.json().get("ID")
+                    resp_json = response.json()
+                    doc_id = resp_json.get("ID")
                 except Exception:
                     pass
 
                 logging.info(f"{log_prefix}AppEnhancer upload success: {filename} | ID={doc_id}")
-                return {"success": True, "document_id": doc_id}
+                result = {"success": True, "document_id": doc_id}
+                if debug:
+                    result["raw_response"] = resp_json
+                return result
 
             # Check for Duplicate Index (Error 125)
             resp_json = {}
@@ -594,7 +669,10 @@ def upload_to_appenhancer(record, local_file, upload_url, dry_run=False, log_pre
             error_code = resp_json.get("ErrorCode")
             if error_code == 125 or "duplicate index" in str(resp_json.get("Message", "")).lower():
                 logging.warning(f"{log_prefix}Duplicate detected for {filename}. Treating as success.")
-                return {"success": True, "document_id": None, "duplicate": True}
+                result = {"success": True, "document_id": None, "duplicate": True}
+                if debug:
+                    result["raw_response"] = resp_json
+                return result
 
             last_error = f"HTTP {response.status_code}: {resp_json.get('Message', response.text)}"
             logging.warning(f"{log_prefix}Upload failed ({response.status_code}): {response.text}")
@@ -829,10 +907,10 @@ def main():
             return
 
         # Resolve AppEnhancer URL components
-        ae_base_url = args.baseurl or config.get("appenhancer_base_url")
+        ae_base_url = args.baseurl or config.get("appenhancer_api_base_url")
         ae_datasource = args.datasource or config.get("appenhancer_datasource")
         ae_appid = args.appid or config.get("appenhancer_appid")
-        ae_urlparams = args.urlparams or config.get("appenhancer_urlparams")
+        ae_urlparams = args.urlparams or config.get("appenhancer_api_urlparams")
 
         # Resolve Slate material field names
         slate_file_url_field = config.get("slate_file_url_field", "FileURL")
@@ -925,6 +1003,7 @@ def main():
 
                 if result["success"]:
                     status = "DUPLICATE" if result.get("duplicate") else "SUCCESS"
+                    document_url = build_document_url(result.get("document_id"), ae_datasource, ae_appid)
 
                     if not args.dry_run:
                         # Archive before recording SUCCESS/DUPLICATE: if the archive
@@ -932,7 +1011,7 @@ def main():
                         # failure (via the outer except below), not double-counted
                         # as both a success and a failure with a stale DB status.
                         archive_file(local_path, record["raw_json"])
-                        update_record_status(filename, status, document_id=result.get("document_id"))
+                        update_record_status(filename, status, document_id=result.get("document_id"), document_url=document_url)
                         logging.info(f"{prefix}Processed successfully | {format_log_metadata(metadata, status)}")
                     else:
                         logging.info(f"{prefix}DRY RUN: {filename} processed successfully | {format_log_metadata(metadata, status)}")
@@ -941,7 +1020,12 @@ def main():
                         duplicate_count += 1
                     else:
                         success_count += 1
-                        success_list.append({"filename": filename, **metadata})
+                        success_list.append({
+                            "filename": filename,
+                            "document_id": result.get("document_id"),
+                            "document_url": document_url or "",
+                            **metadata,
+                        })
                 else:
                     if not args.dry_run:
                         final_status = resolve_failure_status(record, "UPLOAD_FAILED")

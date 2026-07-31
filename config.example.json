@@ -12,14 +12,15 @@
   "download_retry_attempts": 5,
   "download_retry_delay": 5,
 
-  "appenhancer_base_url": "https://appenhancer.yourschool.edu/AppEnhancerReST/api",
+  "appenhancer_api_base_url": "https://appenhancer.yourschool.edu/AppEnhancerReST/api",
+  "appenhancer_document_base_url": "https://appenhancer.yourschool.edu/AppEnhancer",
   "appenhancer_datasource": "YOUR_DATASOURCE",
   "appenhancer_appid": "YOUR_APP_ID",
-  "appenhancer_urlparams": "importOption=DecryptPDFFile",
-  "appenhancer_user": "YOUR_APPENHANCER_USERNAME",
-  "appenhancer_pass": "YOUR_APPENHANCER_PASSWORD",
-  "appenhancer_retry_attempts": 3,
-  "appenhancer_retry_delay": 5,
+  "appenhancer_api_urlparams": "importOption=DecryptPDFFile",
+  "appenhancer_api_user": "YOUR_APPENHANCER_USERNAME",
+  "appenhancer_api_pass": "YOUR_APPENHANCER_PASSWORD",
+  "appenhancer_api_retry_attempts": 3,
+  "appenhancer_api_retry_delay": 5,
 
   "max_attempts": 0,
 
