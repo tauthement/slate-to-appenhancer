@@ -5,6 +5,7 @@ import re
 import sys
 import fcntl
 import json
+import html
 import shutil
 import logging
 import requests
@@ -15,6 +16,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 import argparse
 
 # --------------------------------------------------------------
@@ -294,15 +297,6 @@ def is_already_successful(filename):
 # --------------------------------------------------------------
 SUMMARY_EMAIL_FIELDS = ["student_id", "first_name", "last_name", "term_code", "admissions_req"]
 SUMMARY_EMAIL_HEADERS = ["Student ID", "First Name", "Last Name", "Term Code", "Admissions Req"]
-SUMMARY_EMAIL_COLUMN_WIDTHS = {
-    "Student ID": 12,
-    "First Name": 15,
-    "Last Name": 15,
-    "Term Code": 10,
-    "Admissions Req": 16,
-    "Filename": 30,
-    "Error": 40,
-}
 
 def get_summary_metadata(record):
     """
@@ -330,29 +324,48 @@ def format_log_metadata(metadata, status=None):
     parts.extend(f"{field}={metadata.get(field, '')}" for field in SUMMARY_EMAIL_FIELDS)
     return " | ".join(parts)
 
-def format_table(headers, rows, column_widths=None):
+def format_table(headers, rows):
     """
     Render a simple aligned, plain-text table from a list of header strings
     and a list of rows (each row a list of cell values, same length as headers).
-    If column_widths (a header -> width dict) is given, every column uses that
-    fixed width, truncating over-long values, so tables line up consistently
-    between emails regardless of content length. Otherwise widths are computed
-    from the longest header/cell, as before.
     """
-    if column_widths:
-        widths = [column_widths.get(h, len(h)) for h in headers]
-    else:
-        widths = [len(h) for h in headers]
-        for row in rows:
-            for i, cell in enumerate(row):
-                widths[i] = max(widths[i], len(str(cell)))
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
 
     def fmt_row(cells):
-        return " | ".join(str(c)[:widths[i]].ljust(widths[i]) for i, c in enumerate(cells))
+        return " | ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
 
     lines = [fmt_row(headers), "-+-".join("-" * w for w in widths)]
     lines.extend(fmt_row(row) for row in rows)
     return "\n".join(lines)
+
+def format_html_table(headers, rows):
+    """
+    Render headers/rows as a real HTML <table>, so columns line up
+    regardless of the email client's font - unlike space-padded
+    plain-text/<pre> tables, which only align in a monospace font.
+
+    Grid lines are drawn with background colors (a colored outer table plus
+    a 1px cellspacing gap) rather than the CSS `border` property, since some
+    mail clients render `border` on individual cells unreliably (dropping a
+    hairline segment here and there).
+    """
+    border_color = "#cccccc"
+    header_style = "padding: 4px 8px; text-align: left; font-weight: bold; background-color: #f2f2f2;"
+    cell_style = "padding: 4px 8px; text-align: left; max-width: 320px; word-break: break-word; background-color: #ffffff;"
+
+    thead = "".join(f'<td style="{header_style}">{html.escape(str(h))}</td>' for h in headers)
+    tbody = "".join(
+        "<tr>" + "".join(f'<td style="{cell_style}">{html.escape(str(c))}</td>' for c in row) + "</tr>"
+        for row in rows
+    )
+    return (
+        f'<table cellpadding="0" cellspacing="1" bgcolor="{border_color}" '
+        f'style="background-color: {border_color}; font-family: Arial, sans-serif; font-size: 13px;">'
+        f"<tr>{thead}</tr>{tbody}</table>"
+    )
 
 def send_summary_email(success_count, fail_count, duplicate_count, success_list, fail_list):
     """
@@ -362,16 +375,19 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
         logging.info("No records processed; skipping summary email.")
         return
 
+    run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject_prefix = config.get("email_subject_prefix", "Slate to AE")
+
     # Build Subject: [Success: X][Fail: Y] or [Success: X]
     if fail_count > 0:
-        subject = f"Slate to AE: [Success: {success_count}][Fail: {fail_count}]"
+        subject = f"{subject_prefix}: [Success: {success_count}][Fail: {fail_count}] - {run_timestamp}"
     else:
-        subject = f"Slate to AE: [Success: {success_count}]"
+        subject = f"{subject_prefix}: [Success: {success_count}] - {run_timestamp}"
 
-    # Build Body
+    # Build plain-text body (fallback for non-HTML mail clients)
     body_lines = [
         f"Slate to AE Import Summary",
-        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Date: {run_timestamp}",
         f"--------------------------------------------------",
         f"Total Successes:  {success_count}",
         f"Total Duplicates: {duplicate_count}",
@@ -379,26 +395,48 @@ def send_summary_email(success_count, fail_count, duplicate_count, success_list,
         f"--------------------------------------------------\n"
     ]
 
+    # Build HTML body (real <table> elements, so columns line up in webmail)
+    html_parts = [
+        "<p>Slate to AE Import Summary<br>",
+        f"Date: {run_timestamp}</p>",
+        "<p>"
+        f"Total Successes:&nbsp;&nbsp;{success_count}<br>"
+        f"Total Duplicates: {duplicate_count}<br>"
+        f"Total Failures:&nbsp;&nbsp;&nbsp;{fail_count}"
+        "</p>",
+    ]
+
     if success_list:
-        body_lines.append("SUCCESSFUL UPLOADS:")
         rows = [
             [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"]]
             for item in success_list
         ]
-        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Filename"], rows, SUMMARY_EMAIL_COLUMN_WIDTHS))
+        headers = SUMMARY_EMAIL_HEADERS + ["Filename"]
+
+        body_lines.append("SUCCESSFUL UPLOADS:")
+        body_lines.append(format_table(headers, rows))
         body_lines.append("")
 
+        html_parts.append("<p><b>Successful Uploads</b></p>")
+        html_parts.append(format_html_table(headers, rows))
+
     if fail_list:
-        body_lines.append("FAILED UPLOADS:")
         rows = [
             [item.get(col, "") for col in SUMMARY_EMAIL_FIELDS] + [item["filename"], item.get("error", "")]
             for item in fail_list
         ]
-        body_lines.append(format_table(SUMMARY_EMAIL_HEADERS + ["Filename", "Error"], rows, SUMMARY_EMAIL_COLUMN_WIDTHS))
+        headers = SUMMARY_EMAIL_HEADERS + ["Filename", "Error"]
+
+        body_lines.append("FAILED UPLOADS:")
+        body_lines.append(format_table(headers, rows))
         body_lines.append("")
 
+        html_parts.append("<p><b>Failed Uploads</b></p>")
+        html_parts.append(format_html_table(headers, rows))
+
     msg_text = "\n".join(body_lines)
-    _send_email(subject, msg_text, log_label="Summary email")
+    msg_html = "\n".join(html_parts)
+    _send_email(subject, msg_text, log_label="Summary email", html_body=msg_html)
 
 def send_crash_alert(error_text):
     """
@@ -416,12 +454,26 @@ def send_crash_alert(error_text):
     ])
     _send_email(subject, body, log_label="Crash alert email")
 
-def _send_email(subject, body, log_label="Email"):
+def _send_email(subject, body, log_label="Email", html_body=None):
     try:
-        message = MIMEText(body)
+        # Sent as multipart/alternative with an HTML part, since most webmail
+        # clients (e.g. Gmail) render plain-text emails in a proportional
+        # font, which breaks the column alignment of any plain-text table.
+        # Callers that don't build their own html_body (e.g. crash alerts)
+        # get a plain <pre> wrapper as a reasonable default.
+        message = MIMEMultipart("alternative")
         message["Subject"] = subject
-        message["From"] = config["smtp_from"]
+        message["From"] = formataddr((config.get("smtp_from_name", ""), config["smtp_from"]))
         message["To"] = config["smtp_to"]
+
+        if html_body is None:
+            html_body = (
+                "<pre style=\"font-family: 'Courier New', Courier, monospace; font-size: 13px;\">"
+                f"{html.escape(body)}"
+                "</pre>"
+            )
+        message.attach(MIMEText(body, "plain"))
+        message.attach(MIMEText(html_body, "html"))
 
         # If smtp_to contains commas, split into a list for the SMTP send call
         recipients = [r.strip() for r in config["smtp_to"].split(",")]

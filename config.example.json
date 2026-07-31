@@ -32,7 +32,9 @@
   "smtp_user": "smtp_user@yourdomain.edu",
   "smtp_pass": "smtp_password",
   "smtp_from": "slate-bdm@yourdomain.edu",
+  "smtp_from_name": "Slate to AppEnhancer",
   "smtp_to": "bdm-admins@yourdomain.edu",
+  "email_subject_prefix": "Slate to AE",
 
   "metadata_mapping": [
     {"field_id": "field1", "slate_key": "ID", "db_column": "student_id"},
