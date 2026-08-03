@@ -19,7 +19,7 @@ Earlier versions of AppExtender/AppEnhancer can be used but may not support the 
 ## Prerequisites
 
 - Python 3.6+
-    - `requests` library: `pip install requests`
+    - Install dependencies: `pip install -r requirements.txt`
 - OpenText AppEnhancer Web Access 24.4
 - OpenText AppEnhancer Administrator 24.4
 - OpenText AppEnhancer REST Services 24.4
