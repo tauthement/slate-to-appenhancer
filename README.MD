@@ -32,24 +32,45 @@ The script relies on a `config.json` file. Use `config.example.json` as a templa
 
 ### Key Configuration Sections
 
-- **Slate API:** URL, Query ID, and Bearer Token for your Slate instance.
+- **General:**
+    - `work_dir`: The working directory the script operates from (location of `records.db`, the lock file, `downloads/`, and `archive/`). Defaults to `.`.
+    - `log_dir`: Directory where Year/Month-organized log files are written. Defaults to `./logs`.
+    - `debug`: When `true`, logs the raw AppEnhancer API response for each upload. Defaults to `false`.
+- **Slate API:**
+    - `slate_api_url`: The base URL used to run your Slate query (e.g., `https://your.slateurl.edu/manage/query/run`).
+    - `slate_query_id`: The ID of your Slate query.
+    - `slate_bearer_token`: The Bearer Token used to authenticate against the Slate query's web service.
     - `slate_file_url_field`: The field name used in the Slate query to output the material download URL (default: `FileURL`).
     - `slate_file_name_field`: The field name used in the Slate query to output the unique filename for the document (default: `FileName`).
+- **Download Retry Settings:**
+    - `download_retry_attempts`: Maximum number of attempts to download a document's PDF before marking it `DOWNLOAD_FAILED`. Defaults to `5`.
+    - `download_retry_delay`: Seconds to wait between download retry attempts. Defaults to `5`.
 - **AppEnhancer API:**
-    - `appenhancer_base_url`: The root URL of the REST API.
+    - `appenhancer_api_base_url`: The root URL of the REST API used to upload documents.
+    - `appenhancer_document_base_url`: The root URL of the AppEnhancer web UI, used to build a direct link to each successfully uploaded document in the summary email. Optional — if omitted, no document link is included.
     - `appenhancer_datasource`: The target datasource (e.g., "TEST" or "PROD").
     - `appenhancer_appid`: The target App ID (e.g., "509").
-    - `appenhancer_urlparams`: Additional query parameters (e.g., `importOption=DecryptPDFFile`).
+    - `appenhancer_api_urlparams`: Additional query parameters (e.g., `importOption=DecryptPDFFile`).
         - In order to utilize document annotations, you must use the `importOption=DecryptPDFFile` parameter since PDFs from Slate are encrypted. 
             - This `importOption=DecryptPDFFile` parameter is not available in AppXtender 20.4 or below per my testing. It was not tested on AppEnhancer 23.4, but was tested using AppEnhancer 24.4. Uploads should still work on older versions using the API endpoint but the PDF may not be decrypted and may not show the annotation tools when viewed in AppXtender/AppEnhancer. Just omit the `importOption=DecryptPDFFile` parameter if you are on an older version of AppXtender/AppEnhancer.
         - To use additional parameters, join them using an ampersand. (e.g., `importOption=DecryptPDFFile&nativetype=true`)
-- **SMTP Settings:**
-    - `smtp_to`: A single email or a comma-separated list of recipients (e.g., `"admin1@school.edu, admin2@school.edu"`).
+    - `appenhancer_api_user` / `appenhancer_api_pass`: The username and password for the AppEnhancer account used to authenticate against the REST API (see [AppEnhancer Setup](#appenhancer-setup)).
+    - `appenhancer_api_retry_attempts`: Maximum number of attempts to upload a document before marking it `UPLOAD_FAILED`. Defaults to `3`.
+    - `appenhancer_api_retry_delay`: Seconds to wait between upload retry attempts. Defaults to `5`.
+- **Retry Settings:**
+    - `max_attempts`: Maximum number of times a record will be retried across runs before it's marked `FAILED_PERMANENT` and stops being retried or reported as a failure. `0` (the default) means unlimited retries.
 - **Cleanup Settings:**
     - `days_to_keep_archive`: Number of days to retain archived documents.
     - `days_to_keep_logs`: Number of days to retain log files.
-- **Retry Settings:**
-    - `max_attempts`: Maximum number of times a record will be retried across runs before it's marked `FAILED_PERMANENT` and stops being retried or reported as a failure. `0` (the default) means unlimited retries.
+- **SMTP Settings:**
+    - `smtp_server`: Hostname of the SMTP server.
+    - `smtp_port`: Port of the SMTP server (e.g., `587`).
+    - `smtp_use_tls`: Whether to use `STARTTLS` when connecting. Defaults to `true`. Set to `false` for servers that don't support or require TLS.
+    - `smtp_user` / `smtp_pass`: Optional credentials for SMTP authentication. If `smtp_user` is omitted, the script sends without authenticating.
+    - `smtp_from`: The email address summary/crash emails are sent from.
+    - `smtp_from_name`: Optional display name shown alongside `smtp_from` (e.g., `"Slate to AppEnhancer"`).
+    - `smtp_to`: A single email or a comma-separated list of recipients (e.g., `"admin1@school.edu, admin2@school.edu"`).
+    - `email_subject_prefix`: Optional prefix used in the summary email subject line. Defaults to `"Slate to AE"`.
 - **Metadata Mapping:** Defines how Slate JSON keys map to AppEnhancer Field IDs and SQLite database columns. Each `db_column` must be a valid SQL identifier (letters, digits, underscores; can't start with a digit) and can't reuse a core column name (`id`, `filename`, `status`, `document_id`, `attempts`, `last_error`, `first_seen_at`, `last_attempt_at`, `uploaded_at`, `raw_json`) — the script validates this at startup and fails fast with a clear error if violated.
 
 ```json
@@ -75,6 +96,12 @@ python3 slatetoappenhancer.py --dry-run
 ### Verbose Logging
 ```bash
 python3 slatetoappenhancer.py --verbose
+```
+
+### Limit Processed Records
+Process at most N pending records, useful for testing:
+```bash
+python3 slatetoappenhancer.py --limit 5
 ```
 
 ### Command Line Overrides
