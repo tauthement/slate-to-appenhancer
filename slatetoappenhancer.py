@@ -23,11 +23,35 @@ import argparse
 # --------------------------------------------------------------
 # Load Config
 # --------------------------------------------------------------
-def load_config():
-    with open("config.json", "r") as f:
-        return json.load(f)
+def _resolve_config_path():
+    """
+    Minimal pre-parse of sys.argv for --config, run before the module-level
+    config/logging setup below (which must happen before anything else in
+    the script runs). main() also declares --config on its full argparse
+    parser purely so it shows up in --help; parsing it twice is intentional.
+    """
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", default="config.json")
+    known_args, _ = pre_parser.parse_known_args()
+    return known_args.config
 
-config = load_config()
+def load_config(path):
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        sys.stderr.write(
+            f"Error: config file not found: {path}\n"
+            "Specify a valid file with --config PATH, or create config.json "
+            "(see config.example.json) in the current directory.\n"
+        )
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"Error: config file at {path} is not valid JSON: {e}\n")
+        sys.exit(1)
+
+CONFIG_PATH = _resolve_config_path()
+config = load_config(CONFIG_PATH)
 
 WORK_DIR = config["work_dir"]
 DOWNLOAD_DIR = os.path.join(WORK_DIR, "downloads")
@@ -878,6 +902,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, metavar="N",
                          help="Process at most N records, for testing purposes.")
+    parser.add_argument("--config", default="config.json", metavar="PATH",
+                         help="Path to the config JSON file to use (default: config.json). "
+                              "Applied at script startup, before argument parsing.")
 
     # AppEnhancer Overrides
     parser.add_argument("--baseurl", help="Override AppEnhancer Base URL")
@@ -900,6 +927,8 @@ def main():
     lock_fd = acquire_lock()
 
     try:
+        logging.info(f"Using config file: {CONFIG_PATH}")
+
         if args.cleanup:
             logging.info("Running in cleanup-only mode (--cleanup); skipping the Slate/AppEnhancer import.")
             cleanup_archives(days_override=args.cleanup_days)

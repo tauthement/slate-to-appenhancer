@@ -13,7 +13,7 @@ Earlier versions of AppExtender/AppEnhancer can be used but may not support the 
 - **Retries:** Configurable retry logic for both file downloads and API uploads. Downloads are written to a temporary `.part` file and only renamed into place after passing a basic PDF sanity check (non-empty, starts with a PDF header), so a killed process or an HTML error page served with a 200 status can never be mistaken for a good, already-downloaded file on the next run.
 - **Duplicate Detection:** Automatically handles "Duplicate Index" errors from AppEnhancer (Error 125) by marking them as such and moving on.
 - **Summary Emails:** Sends a detailed execution report at the end of each run to one or more recipients.
-- **CLI Overrides:** Easily override the AppEnhancer Base URL, Datasource, App ID, and URL parameters from the command line.
+- **CLI Overrides:** Easily override the AppEnhancer Base URL, Datasource, App ID, and URL parameters from the command line. A different config file (e.g. for a different Slate query) can also be selected with `--config`.
 - **Automatic Cleanup:** Periodically removes old archive files, old log files, and clears the downloads directory after each run.
 
 ## Prerequisites
@@ -28,7 +28,7 @@ Earlier versions of AppExtender/AppEnhancer can be used but may not support the 
 
 ## Configuration
 
-The script relies on a `config.json` file. Use `config.example.json` as a template. Rename or copy the file to `config.json`.
+The script relies on a `config.json` file. Use `config.example.json` as a template. Rename or copy the file to `config.json`. To run against a different Slate query or environment, use `--config /path/to/other-config.json` instead of the default `config.json` in the current directory.
 
 ### Key Configuration Sections
 
@@ -102,6 +102,12 @@ python3 slatetoappenhancer.py --verbose
 Process at most N pending records, useful for testing:
 ```bash
 python3 slatetoappenhancer.py --limit 5
+```
+
+### Custom Config File
+Point at a different config file, e.g. to run the script against a different Slate query:
+```bash
+python3 slatetoappenhancer.py --config /path/to/other-config.json
 ```
 
 ### Command Line Overrides
