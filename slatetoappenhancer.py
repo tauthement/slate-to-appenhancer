@@ -23,16 +23,45 @@ import argparse
 # --------------------------------------------------------------
 # Load Config
 # --------------------------------------------------------------
+def build_arg_parser():
+    """
+    Build the full CLI argument parser. Used both here (to resolve --config
+    and let -h/--help print and exit before any config file is required)
+    and in main() (for the actual parse/validation of all arguments).
+    """
+    parser = argparse.ArgumentParser(description="Slate to AppEnhancer Import Script")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int, metavar="N",
+                         help="Process at most N records, for testing purposes.")
+    parser.add_argument("--config", default="config.json", metavar="PATH",
+                         help="Path to the config JSON file to use (default: config.json). "
+                              "Applied at script startup, before argument parsing.")
+
+    # AppEnhancer Overrides
+    parser.add_argument("--baseurl", help="Override AppEnhancer Base URL")
+    parser.add_argument("--datasource", help="Override AppEnhancer Datasource")
+    parser.add_argument("--appid", help="Override AppEnhancer App ID")
+    parser.add_argument("--urlparams", help="Override AppEnhancer URL Parameters")
+
+    # Cleanup
+    parser.add_argument("--cleanup", action="store_true",
+                         help="Run only the archive/log cleanup and exit, skipping the Slate/AppEnhancer import.")
+    parser.add_argument("--cleanup-days", type=int, metavar="N",
+                         help="Override days_to_keep_archive and days_to_keep_logs with N for this invocation "
+                              "(applies to --cleanup or to the automatic end-of-run cleanup).")
+    return parser
+
 def _resolve_config_path():
     """
-    Minimal pre-parse of sys.argv for --config, run before the module-level
-    config/logging setup below (which must happen before anything else in
-    the script runs). main() also declares --config on its full argparse
-    parser purely so it shows up in --help; parsing it twice is intentional.
+    Resolve --config from sys.argv before the module-level config/logging
+    setup below (which must happen before anything else in the script
+    runs). Uses the full parser (not a stripped-down one) so -h/--help
+    prints and exits here, before config loading is attempted -- letting
+    --help work even when no config file exists. main() re-parses with the
+    same parser afterward; parsing twice is intentional.
     """
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", default="config.json")
-    known_args, _ = pre_parser.parse_known_args()
+    known_args, _ = build_arg_parser().parse_known_args()
     return known_args.config
 
 def load_config(path):
@@ -897,29 +926,7 @@ def cleanup_logs(days_override=None):
 # Main
 # --------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Slate to AppEnhancer Import Script")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--limit", type=int, metavar="N",
-                         help="Process at most N records, for testing purposes.")
-    parser.add_argument("--config", default="config.json", metavar="PATH",
-                         help="Path to the config JSON file to use (default: config.json). "
-                              "Applied at script startup, before argument parsing.")
-
-    # AppEnhancer Overrides
-    parser.add_argument("--baseurl", help="Override AppEnhancer Base URL")
-    parser.add_argument("--datasource", help="Override AppEnhancer Datasource")
-    parser.add_argument("--appid", help="Override AppEnhancer App ID")
-    parser.add_argument("--urlparams", help="Override AppEnhancer URL Parameters")
-
-    # Cleanup
-    parser.add_argument("--cleanup", action="store_true",
-                         help="Run only the archive/log cleanup and exit, skipping the Slate/AppEnhancer import.")
-    parser.add_argument("--cleanup-days", type=int, metavar="N",
-                         help="Override days_to_keep_archive and days_to_keep_logs with N for this invocation "
-                              "(applies to --cleanup or to the automatic end-of-run cleanup).")
-
-    args = parser.parse_args()
+    args = build_arg_parser().parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
